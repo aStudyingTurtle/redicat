@@ -1,0 +1,299 @@
+//! # Base Depth Analysis
+//!
+//! Performs a single pass over a BAM/CRAM file to calculate depth at each position
+//! as well as depth per nucleotide. Additionally counts the number of
+//! insertions / deletions at each position.
+//!
+//! This implementation is optimized for detecting indels in reduced representation
+//! sequencing data, which is the primary purpose of REDICAT.
+//!
+//! # Features
+//!
+//! - Parallel processing using the par_granges framework
+//! - Configurable filtering based on base quality and depth thresholds
+//! - Support for both 0-based and 1-based coordinate output
+//! - Optional bgzip compression for output
+//! - Support for BED and BCF/VCF region restrictions
+use anyhow::Result;
+use log::*;
+use redicat_lib::{
+    par_granges::{self, RegionProcessor},
+    position::pileup_position::PileupPosition,
+    utils,
+};
+use rust_htslib::{bam, bam::Read, bam::record::Record, bam::pileup::Alignment};
+use std::cmp::max;
+use std::{convert::TryInto, path::PathBuf};
+use structopt::StructOpt;
+
+/// Calculate the depth at each base, per-nucleotide.
+#[derive(StructOpt)]
+#[structopt(author, name = "bulk")]
+pub struct Bulk {
+    /// Input indexed BAM/CRAM to analyze.
+    reads: PathBuf,
+
+    /// Output path, defaults to stdout.
+    #[structopt(long, short = "o")]
+    output: Option<PathBuf>,
+
+    /// Optionally bgzip the output.
+    #[structopt(long, short = "Z")]
+    bgzip: bool,
+
+    /// The number of threads to use.
+    #[structopt(long, short = "t", default_value = "10")]
+    threads: usize,
+
+    /// The number of threads to use for compressing output (specified by --bgzip)
+    #[structopt(long, short = "T", default_value = "2")]
+    compression_threads: usize,
+
+    /// The level to use for compressing output (specified by --bgzip)
+    #[structopt(long, short = "L", default_value = "2")]
+    compression_level: u32,
+
+    /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
+    #[structopt(long, short = "c", default_value=par_granges::CHUNKSIZE_STR.as_str())]
+    chunksize: u32,
+
+    // NB: If there are large regions of low coverage, bumping this up may be helpful.
+    /// The fraction of a gigabyte to allocate per thread for message passing, can be greater than 1.0.
+    #[structopt(long, short = "C", default_value = "0.5")]
+    channel_size_modifier: f64,
+
+
+    /// Minium base quality for a base to be counted toward [A, C, T, G]. If the base is less than the specified
+    /// quality score it will instead be counted as an `N`. If nothing is set for this to 30.
+    #[structopt(long, short = "Q")]
+    min_baseq: Option<u8>,
+
+    /// Output positions as 0-based instead of 1-based.
+    #[structopt(long, short = "z")]
+    zero_base: bool,
+
+    /// Set the max depth for a pileup. If a positions depth is within 1% of max-depth the `NEAR_MAX_DEPTH`
+    /// output field will be set to true and that position should be viewed as suspect.
+    #[structopt(long, short = "D", default_value = "8000")]
+    max_depth: u32,
+    /// The minimum valid depth to report on. If a position has a depth less than this it will not be reported.
+    #[structopt(long, short = "d", default_value = "10")]
+    min_depth: u32,
+    /// The number of N at a position must be less than or equal to this fraction of the total depth to be reported.
+    #[structopt(long, short = "n", default_value = "20")]
+    max_n_fraction: u32,
+    /// Use edited filtering logic. If true, applies more stringent filtering based on nucleotide counts.
+    #[structopt(long, short = "e")]
+    edited: bool,
+}
+
+impl Bulk {
+    pub fn run(self) -> Result<()> {
+        info!("Running redicat-bulk on: {:?}", self.reads);
+        let cpus = utils::determine_allowed_cpus(self.threads)?;
+
+        let mut writer = utils::get_writer(
+            &self.output,
+            self.bgzip,
+            true,
+            self.compression_threads,
+            self.compression_level,
+        )?;
+
+        let base_processor = BaseProcessor::new(
+            self.reads.clone(),
+            if self.zero_base { 0 } else { 1 },
+            self.max_depth,
+            self.min_depth,
+            self.max_n_fraction,
+            self.min_baseq,
+            self.edited,
+        );
+
+        let par_granges_runner = par_granges::ParGranges::new(
+            self.reads.clone(),
+            None,
+            None,
+            None,
+            false,
+            Some(cpus),
+            Some(self.chunksize),
+            Some(self.channel_size_modifier),
+            base_processor,
+        );
+
+        let receiver = par_granges_runner.process()?;
+
+        for pos in receiver.into_iter() {
+            writer.serialize(pos)?
+        }
+
+        writer.flush()?;
+        Ok(())
+    }
+}
+
+/// Holds the info needed for [par_granges::RegionProcessor] implementation
+struct BaseProcessor {
+    /// path to indexed BAM/CRAM
+    reads: PathBuf,
+    /// 0-based or 1-based coordiante output
+    coord_base: u32,
+    /// max depth to pass to htslib pileup engine, max value is MAX(i32)
+    max_depth: u32,
+    /// min depth to report on
+    min_depth: u32,
+    /// max percentage of N to report on
+    max_n_fraction: u32,
+    /// an optional base quality score. If Some(number) if the base quality is not >= that number the base is treated as an `N`
+    min_baseq: Option<u8>,
+    /// whether to use edited filtering logic
+    edited: bool,
+}
+
+impl BaseProcessor {
+    /// Create a new BaseProcessor
+    fn new(
+        reads: PathBuf,
+        coord_base: u32,
+        max_depth: u32,
+        min_depth: u32,
+        max_n_fraction: u32,
+        min_baseq: Option<u8>,
+        edited: bool,
+    ) -> Self {
+        let min_baseq = min_baseq.or(Some(30u8));
+        Self {
+            reads,
+            coord_base,
+            max_depth,
+            min_depth,
+            max_n_fraction,
+            min_baseq,
+            edited,
+        }
+    }
+}
+
+/// Implement [par_granges::RegionProcessor] for [BaseProcessor]
+impl RegionProcessor for BaseProcessor {
+    /// Objects of [PileupPosition] will be returned by each call to [BaseProcessor::process_region]
+    type P = PileupPosition;
+
+    /// Process a region by fetching it from a BAM/CRAM, getting a pileup, and then
+    /// walking the pileup (checking bounds) to create Position objects according to
+    /// the defined filters
+    fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<PileupPosition> {
+        // Create a reader
+        let mut reader =
+            bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
+
+        let header = reader.header().to_owned();
+        // fetch the region of interest
+        reader.fetch((tid, start, stop)).expect("Fetched a region");
+        // Walk over pileups
+        let mut pileup: bam::pileup::Pileups<'_, bam::IndexedReader> = reader.pileup();
+        pileup.set_max_depth(std::cmp::min(
+            i32::max_value().try_into().unwrap(),
+            self.max_depth,
+        ));
+
+        let mut result = Vec::new();
+        for p in pileup {
+            let pileup = p.expect("Extracted a pileup");
+            // Verify that we are within the bounds of the chunk we are iterating on
+            if pileup.pos() >= start && pileup.pos() < stop {
+                // Use a dummy filter that passes all reads since filtering is now handled in preprocessing
+                struct DummyFilter;
+                impl redicat_lib::read_filter::ReadFilter for DummyFilter {
+                    fn filter_read(&self, _read: &Record, _alignment: Option<&Alignment>) -> bool {
+                        true
+                    }
+                }
+                let dummy_filter = DummyFilter;
+                let mut pos = PileupPosition::from_pileup(
+                    pileup,
+                    &header,
+                    &dummy_filter,
+                    self.min_baseq,
+                );
+                pos.pos += self.coord_base;
+
+                let should_include = if self.edited {
+                    let valid_value = max(pos.depth / 1000_u32, 2);
+                    let mut count = 0;
+                    if pos.a > valid_value {
+                        count += 1;
+                    }
+                    if pos.t > valid_value {
+                        count += 1;
+                    }
+                    if pos.g > valid_value {
+                        count += 1;
+                    }
+                    if pos.c > valid_value {
+                        count += 1;
+                    }
+
+                    ((pos.depth - pos.n) >= self.min_depth)
+                        && (count >= 2)
+                        && (pos.n <= max(pos.depth / self.max_n_fraction, 2))
+                } else {
+                    // Original simple filtering: just check if coverage is above min_depth
+                    (pos.depth - pos.n) >= self.min_depth
+                };
+
+                if should_include {
+                    result.push(pos);
+                }
+            }
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_process_region_chr22() {
+        // Check if the test file exists
+        let test_bam_path = PathBuf::from("test/chr22.bam");
+        if !test_bam_path.exists() {
+            info!(
+                "Test BAM file not found at {:?}, skipping test",
+                test_bam_path
+            );
+            return;
+        }
+
+        // Create a BaseProcessor
+        let processor = BaseProcessor::new(
+            test_bam_path,
+            1, // 1-based coordinates
+            10000,    // max_depth
+            10,       // min_depth
+            20,       // max_n_fraction
+            Some(30), // min_baseq
+            false,    // edited
+        );
+
+        // Process the region chr22:11252003-11252024 (0-based coordinates would be 11252002-11252024)
+        // For 1-based coordinates, we pass 11252003-11252024 directly
+        let results = processor.process_region(14, 22901237, 22901238); // tid=0 for chr22, 0-based start/end
+
+        // Print results using log::info! as requested
+        info!("Found {} positions", results.len());
+        for pos in &results {
+            info!(
+                "Position: {}, Depth: {}, A: {}, T: {}, C: {}, G: {}, N: {} Ins: {}, Del: {}, RefSkip: {}, Fail: {}",
+                pos.pos, pos.depth, pos.a, pos.t, pos.c, pos.g, pos.n, pos.ins, pos.del, pos.ref_skip, pos.fail
+            );
+        }
+
+        // Just print the results without asserting - useful for debugging
+        // In a real test with actual data, you would add appropriate assertions
+    }
+}
