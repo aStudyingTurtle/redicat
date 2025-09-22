@@ -5,6 +5,10 @@
 
 REDICAT (RNA Editing Cellular Assessment Toolkit) is a highly parallelized utility for analyzing RNA editing events in single-cell RNA-seq data. Originally designed for detecting indels in reduced representation sequencing data, REDICAT has been extended to include powerful functionality for comprehensive RNA editing analysis.
 
+REDICAT is built on **Rust**, a systems programming language, and is precompiled into binary code, delivering **exceptional performance and robust concurrency capabilities**.
+
+![redicat](./imgs/redicat.png)
+
 The toolkit provides several analysis modules:
 - `bulk`: Calculate depth and nucleotide counts at each base position
 - `bam2mtx`: Convert BAM files to single-cell matrices
@@ -14,19 +18,35 @@ The toolkit provides several analysis modules:
 If a metric is missing or performance is lacking, please file a bug/feature ticket in issues.
 
 
+
+Please cite us:
+
+```
+Wei, T., Li, J., Lei, X., Lin, R., Wu, Q., Zhang, Z., Shuai, S., & Tian, R. (2025). Multimodal CRISPR screens uncover DDX39B as a global repressor of a-to-I RNA editing. Cell Reports, 44(7). https://doi.org/10.1016/j.celrep.2025.116009
+```
+
+
+
+
 ## Quick Start
 
 ```bash
-# Analyze base depth at each position
-redicat bulk input.bam
-
-# Convert BAM to single-cell matrix
-redicat bam2mtx --bam input.bam --tsv positions.tsv --barcodes barcodes.tsv --output matrix.h5ad
+# Download the latest release
+wget https://github.com/aStudyingTurtle/redicat/releases/download/latest/redicat
+chmod 777 redicat
+./redicat
 
 # Filter BAM file
-redicat preprocess --barcodes whitelist.tsv --inbam input.bam --outbam filtered.bam
+redicat preprocess --barcodes barcodes.tsv.gz --inbam input.bam --outbam filtered.bam
 
-# Run RNA editing analysis pipeline
+# Analyze candidate editing sites
+redicat bulk --edited input.bam -o positions.tsv.gz
+
+# Convert BAM to single-cell base mismatch matrix
+redicat bam2mtx --bam input.bam --tsv positions.tsv.gz --barcodes barcodes.tsv.gz --output matrix.h5ad
+
+# Call candidate RNA editing events with potiential biological insights and generate the editing events matrix for downstream analyse (ref, alt, others)
+# It is recommand to use site-white-list form some databases like REDiPortal. It is a tsv format table with CHROM and POS column (fitst 2 columns).
 redicat call --input input.h5ad --output output.h5ad --fa reference.fa --site-white-list editing_sites.tsv.gz
 ```
 
@@ -67,7 +87,7 @@ Some libs of the `bulk` tool are from [perbase](https://github.com/sstadick/perb
 
 
 ```bash
-redicat bulk ./test/test.bam
+redicat bulk --edited ./test/test.bam
 ```
 
 Usage:
@@ -89,20 +109,7 @@ FLAGS:
 
 OPTIONS:
     -B, --bcf-file <bcf-file>
-            A BCF/VCF file containing positions of interest. If specified, only bases from the given positions will be
-            reported on
-    -b, --bed-file <bed-file>
-            A BED file containing regions of interest. If specified, only bases from the given regions will be reported
-            on
-    -C, --channel-size-modifier <channel-size-modifier>
-            The fraction of a gigabyte to allocate per thread for message passing, can be greater than 1.0 [default:
-            0.5]
-    -c, --chunksize <chunksize>
-            The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) *
-            chunksize [default: 500000]
-    -D, --max-depth <max-depth>
-            Set the max depth for a pileup. If a positions depth is within 1% of max-depth the `NEAR_MAX_DEPTH` output
-            field will be set to true and that position should be viewed as suspect [default: 8000]
+            A BCF/VCF file containing positions of interest. If specified, only bases from the given positions will be reported on
     -d, --min-depth <min-depth>                              
             The minimum valid depth to report on. If a position has a depth less than this it will not be reported. [default: 10]
     -Q, --min-base-quality-score <min-base-quality-score>
@@ -136,10 +143,6 @@ The `--tsv` file can be either a plain TSV file or a gzipped TSV file (with `.ts
 #### Parameters
 
 - `--chunksize`: Controls the number of genomic positions processed in each parallel chunk. Larger values reduce scheduling overhead but increase memory usage. Smaller values improve load balancing but may increase scheduling overhead. Default: 2500.
-- `--matrix-density`: Matrix density estimation for memory optimization. Typical values: sparse matrix 0.001-0.01, medium density 0.01-0.1, dense matrix 0.1+. Default: 0.005.
-- `--use-mmap`: Enable memory-mapped IO for better performance with large files. Recommended: enable for large files (>1GB), disable for small files to avoid system call overhead. Default: false.
-- `--large-dataset`: Use optimized configuration for large datasets (>10M cells or positions). Automatically adjusts chunk_size=25000, matrix_density=0.005, use_mmap=true, batch_size=2000.
-- `--memory-efficient`: Use memory-efficient configuration for resource-constrained environments. Automatically adjusts threads=half, chunk_size=8000, use_mmap=false, batch_size=500.
 
 Usage:
 
@@ -211,6 +214,8 @@ The `call` tool is the RNA editing detection and analysis pipeline. It processes
 ```bash
 redicat call --input input.h5ad --output output.h5ad --fa reference.fa --site-white-list editing_sites.tsv.gz
 ```
+
+![redicat-1](./imgs/redicat-1.png)
 
 Usage:
 
@@ -302,18 +307,8 @@ redicat/
 └── README.md                # This file
 ```
 
-## Contributing
+## Other Tools
 
-We welcome contributions to REDICAT! Please see our [contributing guidelines](docs/CONTRIBUTING.md) for more information.
+[rnabioco/raer: Characterize A-to-I RNA editing in bulk and single-cell RNA sequencing experiments](https://github.com/rnabioco/raer/)
 
-1. Fork the repository
-2. Create a new branch for your feature or bug fix
-3. Make your changes and add tests if applicable
-4. Run the test suite: `cargo test`
-5. Submit a pull request with a clear description of your changes
-
-For major changes, please open an issue first to discuss what you would like to change.
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+[YeoLab/MARINE: MARINE: Multi-core Algorithm for Rapid Identification of Nucleotide Edits](https://github.com/YeoLab/MARINE)
