@@ -16,7 +16,11 @@ The toolkit provides several analysis modules:
 
 If a metric is missing or performance is lacking, please file a bug/feature ticket in issues.
 
+## Performance highlights (latest build)
 
+- Pre-computed chromosome lookup tables eliminate per-pileup header scans during `bam2mtx` chunking, improving random-access workloads.
+- UMI consensus now relies on compact byte encoding plus `FxHashMap` pooling, reducing string allocations and contention across threads.
+- Conflict resolution short-circuits on mismatched UMIs, ensuring only consistent base/strand observations reach the sparse matrix stage.
 
 Please cite us:
 
@@ -82,6 +86,8 @@ cargo install --git https://github.com/aStudyingTurtle/redicat_rust.git
 
 The `bulk` tool walks over every position in the BAM/CRAM file and calculates the depth, as well as the number of each nucleotide at the given position. Additionally, it counts the numbers of Ins/Dels at each position.
 Some libs of the `bulk` tool are from [perbase](https://github.com/sstadick/perbase).
+
+You can now hand the barcode whitelist directly to `bulk` via `--barcodes` to reproduce the legacy preprocessing stage; reads without a valid `CB` tag or with placeholder `UB` values are discarded on the fly. Pair this with `--mapquality` (default `255`) to keep the filtering contract explicit between the first and second pass.
 
 By default, the tool applies stringent filtering to identify high-quality editing sites. Use the `--all` flag to report all positions with less stringent filtering. The output is automatically compressed using gzip compression.
 
@@ -156,11 +162,17 @@ redicat bam2mtx --bam input.bam --tsv positions.tsv.gz --barcodes barcodes.tsv.g
 redicat bam2mtx --bam input.bam --barcodes barcodes.tsv.gz --output output.h5ad --two-pass
 ```
 
-When未提供 `--tsv` 且启用 `--two-pass`，命令会先运行 `bulk` 生成 `1pass.tsv.gz`，其中会自动应用 `mapquality`、`barcodes` 和 `UB` 过滤。
+When `--tsv` is omitted and `--two-pass` is supplied, the command first runs `bulk` to produce `1pass.tsv.gz`, automatically reusing the same `--mapquality`, barcode whitelist, and UMI filtering semantics.
 
 #### Parameters
 
 - `--chunksize`: Controls the number of genomic positions processed in each parallel chunk. Larger values reduce scheduling overhead but increase memory usage. Smaller values improve load balancing but may increase scheduling overhead. Default: 2500.
+
+Implementation notes:
+
+- Chromosome IDs are cached once per worker, meaning random seeks no longer repeat header lookups for every site.
+- UMI consensus is tracked with compact byte codes instead of string concatenation, reducing allocator pressure when processing millions of reads.
+- Conflicting UMIs are filtered before aggregation so that only consistent base/strand observations populate the downstream sparse matrices.
 
 Usage:
 

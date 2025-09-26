@@ -14,6 +14,7 @@
 //! - Memory-efficient processing for large datasets
 //! - Configurable chunk sizes and matrix density estimation
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -30,6 +31,7 @@ use redicat_lib::bam2mtx::{
     processor::{BamProcessorConfig, PositionData, StrandBaseCounts},
 };
 use redicat_lib::utils;
+use rustc_hash::FxHashMap;
 
 /// Arguments for the bam2mtx command
 #[derive(Debug, StructOpt)]
@@ -200,40 +202,111 @@ struct OptimizedChunkProcessor {
     bam_path: PathBuf,
     config: BamProcessorConfig,
     barcode_processor: Arc<BarcodeProcessor>,
+    tid_lookup: FxHashMap<String, u32>,
+    count_capacity_hint: usize,
+    umi_capacity_hint: usize,
 }
 
 impl OptimizedChunkProcessor {
+    const CONFLICT_CODE: u8 = u8::MAX;
+
+    #[inline]
+    fn encode_call(stranded: bool, base: char, is_reverse: bool) -> Option<u8> {
+        let base_code = match base {
+            'A' => 0,
+            'T' => 1,
+            'G' => 2,
+            'C' => 3,
+            _ => return None,
+        };
+
+        if stranded {
+            let strand_bit = if is_reverse { 1 } else { 0 };
+            Some((base_code << 1) | strand_bit)
+        } else {
+            Some(base_code)
+        }
+    }
+
+    #[inline]
+    fn apply_encoded_call(stranded: bool, code: u8, counts_entry: &mut StrandBaseCounts) {
+        if stranded {
+            let strand_bit = code & 1;
+            let base_code = code >> 1;
+            let target = if strand_bit == 1 {
+                &mut counts_entry.reverse
+            } else {
+                &mut counts_entry.forward
+            };
+
+            match base_code {
+                0 => target.a += 1,
+                1 => target.t += 1,
+                2 => target.g += 1,
+                3 => target.c += 1,
+                _ => {}
+            }
+        } else {
+            match code {
+                0 => counts_entry.forward.a += 1,
+                1 => counts_entry.forward.t += 1,
+                2 => counts_entry.forward.g += 1,
+                3 => counts_entry.forward.c += 1,
+                _ => {}
+            }
+        }
+    }
+
     pub fn new(
         bam_path: PathBuf,
         config: BamProcessorConfig,
         barcode_processor: Arc<BarcodeProcessor>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let header = rust_htslib::bam::IndexedReader::from_path(&bam_path)?
+            .header()
+            .to_owned();
+
+        let mut tid_lookup =
+            FxHashMap::with_capacity_and_hasher(header.target_count() as usize, Default::default());
+
+        for tid in 0..header.target_count() {
+            if let Ok(name) = std::str::from_utf8(header.tid2name(tid)) {
+                tid_lookup.insert(name.to_string(), tid);
+            }
+        }
+
+        let barcode_count = barcode_processor.len();
+        let count_capacity_hint = barcode_count.clamp(64, 4096);
+        let umi_capacity_hint = count_capacity_hint.saturating_mul(8);
+
+        Ok(Self {
             bam_path,
             config,
             barcode_processor,
-        }
+            tid_lookup,
+            count_capacity_hint,
+            umi_capacity_hint,
+        })
     }
 
     pub fn process_chunk(&self, chunk: &PositionChunk) -> Result<Vec<PositionData>> {
-        use rust_htslib::bam::{self, Read};
-
-        let mut reader = bam::IndexedReader::from_path(&self.bam_path)?;
+        let mut reader = rust_htslib::bam::IndexedReader::from_path(&self.bam_path)?;
         let mut chunk_results = Vec::with_capacity(chunk.positions.len());
 
-        // Pre-allocate reusable containers to reduce allocations
-        let mut counts = std::collections::HashMap::with_capacity(1000);
-        let mut umi_consensus = std::collections::HashMap::with_capacity(10000);
+        let mut counts: FxHashMap<String, StrandBaseCounts> = FxHashMap::default();
+        counts.reserve(self.count_capacity_hint);
+        let mut umi_consensus: FxHashMap<(String, String), u8> = FxHashMap::default();
+        umi_consensus.reserve(self.umi_capacity_hint);
 
         for pos_data in &chunk.positions {
-            counts.clear();
-            umi_consensus.clear();
+            debug_assert!(counts.is_empty());
+            debug_assert!(umi_consensus.is_empty());
 
             let chrom = pos_data.chrom.as_str();
             let pos = pos_data.pos;
 
-            let tid = match reader.header().tid(chrom.as_bytes()) {
-                Some(tid) => tid,
+            let tid = match self.tid_lookup.get(chrom) {
+                Some(tid) => *tid,
                 None => continue,
             };
 
@@ -258,8 +331,8 @@ impl OptimizedChunkProcessor {
         tid: u32,
         pos: u64,
         chrom: &str,
-        counts: &mut std::collections::HashMap<String, StrandBaseCounts>,
-        umi_consensus: &mut std::collections::HashMap<String, String>,
+        counts: &mut FxHashMap<String, StrandBaseCounts>,
+        umi_consensus: &mut FxHashMap<(String, String), u8>,
     ) -> Result<PositionData> {
         reader.fetch((tid, pos as u32, pos as u32 + 1))?;
 
@@ -286,68 +359,42 @@ impl OptimizedChunkProcessor {
                     continue;
                 }
                 let base = self.get_base_at_position(&record, alignment.qpos())?;
-                let strand = if record.is_reverse() { "-" } else { "+" };
+                let is_reverse = record.is_reverse();
 
-                // Use string interning to reduce memory allocations
-                let key = format!("{}:{}", cell_barcode, umi);
-                let base_strand = if self.config.stranded {
-                    format!("{}{}", base, strand)
-                } else {
-                    base.to_string()
-                };
-
-                umi_consensus
-                    .entry(key.clone())
-                    .and_modify(|existing| {
-                        if *existing != base_strand {
-                            *existing = "-".to_string();
-                        }
-                    })
-                    .or_insert(base_strand);
+                if let Some(encoded) = Self::encode_call(self.config.stranded, base, is_reverse) {
+                    umi_consensus
+                        .entry((cell_barcode, umi))
+                        .and_modify(|existing| {
+                            if *existing != encoded {
+                                *existing = Self::CONFLICT_CODE;
+                            }
+                        })
+                        .or_insert(encoded);
+                }
             }
         }
 
         // Process UMI consensus with optimized aggregation
-        for (key, base_strand) in umi_consensus.drain() {
-            if base_strand == "-" {
+        for ((cell_barcode, _umi), encoded) in umi_consensus.drain() {
+            if encoded == Self::CONFLICT_CODE {
                 continue;
             }
 
-            let separator_pos = key.find(':').unwrap_or(key.len());
-            let cell_barcode = &key[..separator_pos];
-
             let counts_entry = counts
-                .entry(cell_barcode.to_string())
+                .entry(cell_barcode)
                 .or_insert_with(StrandBaseCounts::default);
 
-            // Optimized base counting with match on bytes for better performance
-            if self.config.stranded {
-                match base_strand.as_bytes() {
-                    [b'A', b'+'] => counts_entry.forward.a += 1,
-                    [b'T', b'+'] => counts_entry.forward.t += 1,
-                    [b'G', b'+'] => counts_entry.forward.g += 1,
-                    [b'C', b'+'] => counts_entry.forward.c += 1,
-                    [b'A', b'-'] => counts_entry.reverse.a += 1,
-                    [b'T', b'-'] => counts_entry.reverse.t += 1,
-                    [b'G', b'-'] => counts_entry.reverse.g += 1,
-                    [b'C', b'-'] => counts_entry.reverse.c += 1,
-                    _ => {}
-                }
-            } else {
-                match base_strand.as_bytes()[0] {
-                    b'A' => counts_entry.forward.a += 1,
-                    b'T' => counts_entry.forward.t += 1,
-                    b'G' => counts_entry.forward.g += 1,
-                    b'C' => counts_entry.forward.c += 1,
-                    _ => {}
-                }
-            }
+            Self::apply_encoded_call(self.config.stranded, encoded, counts_entry);
         }
+
+        let mut position_counts: HashMap<String, StrandBaseCounts> =
+            HashMap::with_capacity(counts.len());
+        position_counts.extend(counts.drain());
 
         Ok(PositionData {
             chrom: chrom.to_string(),
             pos: pos + 1,
-            counts: std::mem::take(counts),
+            counts: position_counts,
         })
     }
 
@@ -504,21 +551,24 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     let total_chunks = chunks.len();
     log::info!("Split into {} chunks for parallel processing", total_chunks);
 
-    let processor = OptimizedChunkProcessor::new(args.bam.clone(), config, barcode_processor);
+    let processor = OptimizedChunkProcessor::new(args.bam.clone(), config, barcode_processor)?;
 
     log::info!("Processing {} chunks...", total_chunks);
     let processing_start = Instant::now();
 
-    let all_results: Vec<Vec<PositionData>> = chunks
+    let chunk_results: Vec<_> = chunks
         .into_par_iter()
         .enumerate()
         .map(|(idx, chunk)| {
             if idx % 50 == 0 {
                 log::debug!("Processing chunk {} of {}", idx + 1, total_chunks);
             }
-            processor.process_chunk(&chunk).unwrap_or_default()
+            processor.process_chunk(&chunk)
         })
         .collect();
+
+    let all_results: Vec<Vec<PositionData>> =
+        chunk_results.into_iter().collect::<Result<_, _>>()?;
 
     let processing_duration = processing_start.elapsed();
     log::info!("Chunk processing completed in {:?}", processing_duration);
