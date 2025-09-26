@@ -1,8 +1,8 @@
 //! REDICAT - RNA Editing Cellular Assessment Toolkit
 //!
-//! REDICAT (RNA Editing Cellular Assessment Toolkit) is a highly parallelized utility 
-//! for analyzing RNA editing events in single-cell RNA-seq data. Originally designed for 
-//! detecting indels in reduced representation sequencing data, REDICAT has been extended 
+//! REDICAT (RNA Editing Cellular Assessment Toolkit) is a highly parallelized utility
+//! for analyzing RNA editing events in single-cell RNA-seq data. Originally designed for
+//! detecting indels in reduced representation sequencing data, REDICAT has been extended
 //! to include powerful functionality for comprehensive RNA editing analysis.
 //!
 //! # Tools
@@ -11,7 +11,6 @@
 //!
 //! - `bulk`: Calculate depth and nucleotide counts at each base position
 //! - `bam2mtx`: Convert BAM files to single-cell matrices
-//! - `preprocess`: Filter BAM files based on various criteria
 //! - `call`: RNA editing detection and analysis pipeline
 //!
 //! # Usage
@@ -23,11 +22,11 @@
 //! # Convert BAM to single-cell matrix
 //! redicat bam2mtx --bam input.bam --tsv positions.tsv --barcodes barcodes.tsv --output matrix.h5ad
 //!
-//! # Filter BAM file
-//! redicat preprocess --barcodes whitelist.tsv --inbam input.bam --outbam filtered.bam
-//!
 //! # Run RNA editing analysis pipeline
 //! redicat call --input input.h5ad --output output.h5ad --fa reference.fa --site-white-list editing_sites.tsv.gz
+//!
+//! # Run bam2mtx with automatic site discovery
+//! redicat bam2mtx --bam input.bam --barcodes barcodes.tsv --output matrix.h5ad --two-pass
 //! ```
 //!
 //! For more detailed usage information, see the documentation for each subcommand.
@@ -54,8 +53,6 @@ enum Subcommand {
     Bulk(commands::Bulk),
     /// Convert BAM files to single-cell matrices
     Bam2mtx(commands::bam2mtx::Bam2MtxArgs),
-    /// Filter BAM files based on various criteria
-    Preprocess(commands::preprocess::PreprocessArgs),
     /// RNA editing detection and analysis pipeline
     Call(commands::call::CallArgs),
 }
@@ -65,7 +62,6 @@ impl Subcommand {
         match self {
             Subcommand::Bulk(x) => x.run()?,
             Subcommand::Bam2mtx(args) => commands::bam2mtx::run_bam2mtx(args)?,
-            Subcommand::Preprocess(args) => commands::preprocess::run_preprocess(args)?,
             Subcommand::Call(args) => commands::call::run_call(args)?,
         }
         Ok(())

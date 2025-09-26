@@ -13,6 +13,7 @@ use grep_cli::stdout;
 use gzp::{deflate::Gzip, BgzfSyncReader, Compression, ZBuilder};
 use lazy_static::lazy_static;
 use log::{error, warn};
+use std::fs;
 use std::{
     ffi::OsStr,
     fs::File,
@@ -20,7 +21,6 @@ use std::{
     path::Path,
 };
 use termcolor::ColorChoice;
-use std::fs;
 
 /// Macro for consistent logging throughout the application
 /// Uses the log::info! macro for structured logging

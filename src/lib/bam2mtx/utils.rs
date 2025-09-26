@@ -13,21 +13,22 @@ pub fn read_positions_from_tsv<P: AsRef<Path>>(
     chrom_col: &str,
     pos_col: &str,
 ) -> Result<Vec<(String, u64)>> {
+    use flate2::read::GzDecoder;
     use std::fs::File;
     use std::io::BufReader;
-    use flate2::read::GzDecoder;
-    
+
     // Create reader based on file extension
     let file = File::open(&path)?;
-    let buf_reader: Box<dyn std::io::BufRead> = if path.as_ref().extension().map_or(false, |ext| ext == "gz") {
-        // Handle .tsv.gz files
-        let decoder = GzDecoder::new(file);
-        Box::new(BufReader::new(decoder))
-    } else {
-        // Handle regular .tsv files
-        Box::new(BufReader::new(file))
-    };
-    
+    let buf_reader: Box<dyn std::io::BufRead> =
+        if path.as_ref().extension().map_or(false, |ext| ext == "gz") {
+            // Handle .tsv.gz files
+            let decoder = GzDecoder::new(file);
+            Box::new(BufReader::new(decoder))
+        } else {
+            // Handle regular .tsv files
+            Box::new(BufReader::new(file))
+        };
+
     let mut reader = ReaderBuilder::new()
         .delimiter(b'\t')
         .has_headers(true)

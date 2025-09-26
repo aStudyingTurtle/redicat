@@ -1,11 +1,11 @@
 //! High-performance sparse matrix operations using nalgebra_sparse native APIs
 
 use crate::call::{RedicatError, Result};
-use nalgebra_sparse::{CsrMatrix, CooMatrix};
+use itertools::Itertools;
 use nalgebra_sparse::ops::serial::spadd_csr_prealloc;
 use nalgebra_sparse::ops::Op;
+use nalgebra_sparse::{CooMatrix, CsrMatrix};
 use rayon::prelude::*;
-use itertools::Itertools;
 use std::collections::HashMap;
 
 pub struct SparseOps;
@@ -29,13 +29,14 @@ impl SparseOps {
         for &(row, col, _) in &triplets {
             if row >= nrows || col >= ncols {
                 return Err(RedicatError::InvalidInput(format!(
-                    "Index ({}, {}) exceeds matrix dimensions ({}, {})", row, col, nrows, ncols
+                    "Index ({}, {}) exceeds matrix dimensions ({}, {})",
+                    row, col, nrows, ncols
                 )));
             }
         }
 
         // Use COO format first, then convert to CSR using native nalgebra_sparse
-        let (row_indices, col_indices, values): (Vec<_>, Vec<_>, Vec<_>) = 
+        let (row_indices, col_indices, values): (Vec<_>, Vec<_>, Vec<_>) =
             triplets.into_iter().multiunzip();
 
         let coo = CooMatrix::try_from_triplets(nrows, ncols, row_indices, col_indices, values)
@@ -60,7 +61,7 @@ impl SparseOps {
             return Ok(CsrMatrix::zeros(nrows, ncols));
         }
 
-        let (row_indices, col_indices, values): (Vec<_>, Vec<_>, Vec<_>) = 
+        let (row_indices, col_indices, values): (Vec<_>, Vec<_>, Vec<_>) =
             triplets.into_iter().multiunzip();
 
         let coo = CooMatrix::try_from_triplets(nrows, ncols, row_indices, col_indices, values)
@@ -70,34 +71,40 @@ impl SparseOps {
     }
 
     /// Highly optimized matrix addition using nalgebra_sparse's spadd operation
-pub fn add_matrices(a: &CsrMatrix<u32>, b: &CsrMatrix<u32>) -> Result<CsrMatrix<u32>> {
-    if a.nrows() != b.nrows() || a.ncols() != b.ncols() {
-        return Err(RedicatError::DimensionMismatch {
-            expected: format!("{}×{}", a.nrows(), a.ncols()),
-            actual: format!("{}×{}", b.nrows(), b.ncols()),
-        });
+    pub fn add_matrices(a: &CsrMatrix<u32>, b: &CsrMatrix<u32>) -> Result<CsrMatrix<u32>> {
+        if a.nrows() != b.nrows() || a.ncols() != b.ncols() {
+            return Err(RedicatError::DimensionMismatch {
+                expected: format!("{}×{}", a.nrows(), a.ncols()),
+                actual: format!("{}×{}", b.nrows(), b.ncols()),
+            });
+        }
+
+        // Use nalgebra_sparse's native sparse addition pattern computation
+        let pattern = nalgebra_sparse::ops::serial::spadd_pattern(a.pattern(), b.pattern());
+
+        // Pre-allocate result matrix with computed pattern
+        let mut result =
+            CsrMatrix::try_from_pattern_and_values(pattern.clone(), vec![0u32; pattern.nnz()])
+                .map_err(|e| {
+                    RedicatError::SparseMatrix(format!("Failed to create result matrix: {:?}", e))
+                })?;
+
+        // Use native sparse addition operation with correct API
+        // API signature: spadd_csr_prealloc(beta, C, alpha, Op<A>)
+        spadd_csr_prealloc(1u32, &mut result, 1u32, Op::NoOp(a))
+            .map_err(|e| RedicatError::SparseMatrix(format!("Sparse addition failed: {:?}", e)))?;
+
+        spadd_csr_prealloc(1u32, &mut result, 1u32, Op::NoOp(b))
+            .map_err(|e| RedicatError::SparseMatrix(format!("Sparse addition failed: {:?}", e)))?;
+
+        Ok(result)
     }
 
-    // Use nalgebra_sparse's native sparse addition pattern computation
-    let pattern = nalgebra_sparse::ops::serial::spadd_pattern(a.pattern(), b.pattern());
-    
-    // Pre-allocate result matrix with computed pattern
-    let mut result = CsrMatrix::try_from_pattern_and_values(pattern.clone(), vec![0u32; pattern.nnz()])
-        .map_err(|e| RedicatError::SparseMatrix(format!("Failed to create result matrix: {:?}", e)))?;
-
-    // Use native sparse addition operation with correct API
-    // API signature: spadd_csr_prealloc(beta, C, alpha, Op<A>)
-    spadd_csr_prealloc(1u32, &mut result, 1u32, Op::NoOp(a))
-        .map_err(|e| RedicatError::SparseMatrix(format!("Sparse addition failed: {:?}", e)))?;
-    
-    spadd_csr_prealloc(1u32, &mut result, 1u32, Op::NoOp(b))
-        .map_err(|e| RedicatError::SparseMatrix(format!("Sparse addition failed: {:?}", e)))?;
-
-    Ok(result)
-}
-
     /// Optimized column filtering using sparsity pattern operations
-    pub fn filter_columns_u32(matrix: &CsrMatrix<u32>, keep_indices: &[usize]) -> Result<CsrMatrix<u32>> {
+    pub fn filter_columns_u32(
+        matrix: &CsrMatrix<u32>,
+        keep_indices: &[usize],
+    ) -> Result<CsrMatrix<u32>> {
         let nrows = matrix.nrows();
         let new_ncols = keep_indices.len();
 
@@ -133,8 +140,16 @@ pub fn add_matrices(a: &CsrMatrix<u32>, b: &CsrMatrix<u32>) -> Result<CsrMatrix<
         }
 
         // Create CSR matrix directly using nalgebra_sparse
-        CsrMatrix::try_from_csr_data(nrows, new_ncols, new_row_offsets, new_col_indices, new_values)
-            .map_err(|e| RedicatError::SparseMatrix(format!("Failed to create filtered matrix: {:?}", e)))
+        CsrMatrix::try_from_csr_data(
+            nrows,
+            new_ncols,
+            new_row_offsets,
+            new_col_indices,
+            new_values,
+        )
+        .map_err(|e| {
+            RedicatError::SparseMatrix(format!("Failed to create filtered matrix: {:?}", e))
+        })
     }
 
     /// Optimized row sums using native CSR structure access
@@ -154,10 +169,10 @@ pub fn add_matrices(a: &CsrMatrix<u32>, b: &CsrMatrix<u32>) -> Result<CsrMatrix<
     /// Optimized column sums using parallel reduction over CSR structure
     pub fn compute_col_sums(matrix: &CsrMatrix<u32>) -> Vec<u32> {
         let ncols = matrix.ncols();
-        
+
         // Use parallel reduction with chunked processing
         let chunk_size = std::cmp::max(1, matrix.nrows() / rayon::current_num_threads());
-        
+
         (0..matrix.nrows())
             .into_par_iter()
             .chunks(chunk_size)
@@ -178,7 +193,7 @@ pub fn add_matrices(a: &CsrMatrix<u32>, b: &CsrMatrix<u32>) -> Result<CsrMatrix<
                         acc[i] = acc[i].saturating_add(val);
                     }
                     acc
-                }
+                },
             )
             .into_iter()
             .map(|sum| (sum.min(u32::MAX as u64)) as u32)
@@ -200,22 +215,25 @@ pub fn add_matrices(a: &CsrMatrix<u32>, b: &CsrMatrix<u32>) -> Result<CsrMatrix<
             .flat_map(|row_idx| {
                 let a_row = a.row(row_idx);
                 let b_row = b.row(row_idx);
-                
+
                 // Create maps for efficient intersection
-                let a_map: HashMap<usize, u32> = a_row.col_indices()
+                let a_map: HashMap<usize, u32> = a_row
+                    .col_indices()
                     .iter()
                     .zip(a_row.values())
                     .map(|(&col, &val)| (col, val))
                     .collect();
-                
-                let b_map: HashMap<usize, u8> = b_row.col_indices()
+
+                let b_map: HashMap<usize, u8> = b_row
+                    .col_indices()
                     .iter()
                     .zip(b_row.values())
                     .map(|(&col, &val)| (col, val))
                     .collect();
-                
+
                 // Compute intersection efficiently
-                a_map.into_iter()
+                a_map
+                    .into_iter()
                     .filter_map(|(col, a_val)| {
                         b_map.get(&col).and_then(|&b_val| {
                             if b_val > 0 {
@@ -247,21 +265,23 @@ pub fn add_matrices(a: &CsrMatrix<u32>, b: &CsrMatrix<u32>) -> Result<CsrMatrix<
         }
 
         let mut result = vec![0u64; matrix.nrows()];
-        
+
         // Use parallel processing for matrix-vector multiplication
-        result.par_iter_mut()
+        result
+            .par_iter_mut()
             .enumerate()
             .for_each(|(row_idx, result_val)| {
                 let row = matrix.row(row_idx);
-                *result_val = row.col_indices()
-                    .iter()
-                    .zip(row.values())
-                    .fold(0u64, |acc, (&col_idx, &mat_val)| {
+                *result_val = row.col_indices().iter().zip(row.values()).fold(
+                    0u64,
+                    |acc, (&col_idx, &mat_val)| {
                         acc.saturating_add((mat_val as u64) * (vector[col_idx] as u64))
-                    });
+                    },
+                );
             });
 
-        Ok(result.into_iter()
+        Ok(result
+            .into_iter()
             .map(|val| (val.min(u32::MAX as u64)) as u32)
             .collect())
     }
@@ -289,7 +309,8 @@ pub trait SparseMatrixExt<T> {
 impl SparseMatrixExt<u32> for CsrMatrix<u32> {
     /// Apply threshold to sparse matrix values
     fn apply_threshold(&self, threshold: u32) -> CsrMatrix<u32> {
-        let triplets: Vec<(usize, usize, u32)> = self.triplet_iter()
+        let triplets: Vec<(usize, usize, u32)> = self
+            .triplet_iter()
             .filter_map(|(row, col, &val)| {
                 if val >= threshold {
                     Some((row, col, val))
@@ -298,7 +319,7 @@ impl SparseMatrixExt<u32> for CsrMatrix<u32> {
                 }
             })
             .collect();
-        
+
         SparseOps::from_triplets_u32(self.nrows(), self.ncols(), triplets)
             .unwrap_or_else(|_| CsrMatrix::zeros(self.nrows(), self.ncols()))
     }

@@ -38,14 +38,14 @@ pub fn calculate_coverage(adata: &mut AnnDataContainer) -> Result<()> {
     // Efficiently sum all matrices using reduce operation
     let coverage = matrices
         .into_iter()
-        .reduce(|acc, matrix| {
-            SparseOps::add_matrices(&acc, &matrix).unwrap_or(acc)
-        })
+        .reduce(|acc, matrix| SparseOps::add_matrices(&acc, &matrix).unwrap_or(acc))
         .unwrap_or_else(|| CsrMatrix::<u32>::zeros(adata.n_obs, adata.n_vars));
 
     adata.layers.insert("coverage".to_string(), coverage);
-    info!("Coverage matrix calculated with {} non-zero elements", 
-          adata.layers.get("coverage").map(|m| m.nnz()).unwrap_or(0));
+    info!(
+        "Coverage matrix calculated with {} non-zero elements",
+        adata.layers.get("coverage").map(|m| m.nnz()).unwrap_or(0)
+    );
     Ok(())
 }
 
@@ -60,22 +60,25 @@ pub fn filter_sites_by_coverage(
     calculate_coverage(&mut adata)?;
 
     // Compute site coverage in parallel
-    let site_coverage = adata.compute_layer_col_sums("coverage")
+    let site_coverage = adata
+        .compute_layer_col_sums("coverage")
         .unwrap_or_else(|| vec![0; adata.n_vars]);
 
     // Create filter mask using parallel iterator
-    let filter_mask: Vec<bool> = adata.var_names
+    let filter_mask: Vec<bool> = adata
+        .var_names
         .par_iter()
         .zip(site_coverage.par_iter())
-        .map(|(name, &cov)| {
-            name.starts_with("chr") && cov >= min_coverage
-        })
+        .map(|(name, &cov)| name.starts_with("chr") && cov >= min_coverage)
         .collect();
 
     let kept_sites = filter_mask.iter().filter(|&&x| x).count();
-    info!("Keeping {} out of {} sites ({}% retained)", 
-          kept_sites, adata.n_vars, 
-          (kept_sites as f64 / adata.n_vars as f64 * 100.0) as u32);
+    info!(
+        "Keeping {} out of {} sites ({}% retained)",
+        kept_sites,
+        adata.n_vars,
+        (kept_sites as f64 / adata.n_vars as f64 * 100.0) as u32
+    );
 
     if kept_sites == 0 {
         return Err(crate::call::error::RedicatError::EmptyData(
@@ -117,7 +120,7 @@ pub fn apply_site_filter(
 
     // Filter var DataFrame
     let filtered_var = filter_dataframe_by_indices(&adata.var, &selected_indices)?;
-    
+
     // Filter var_names in parallel
     let filtered_var_names: Vec<String> = selected_indices
         .par_iter()
@@ -143,7 +146,8 @@ pub fn count_base_levels(mut adata: AnnDataContainer) -> Result<AnnDataContainer
         .par_iter()
         .map(|&base| {
             let layer_name = format!("{}1", base);
-            let counts = adata.compute_layer_col_sums(&layer_name)
+            let counts = adata
+                .compute_layer_col_sums(&layer_name)
                 .unwrap_or_else(|| vec![0u32; adata.n_vars]);
             (base, counts)
         })
@@ -157,7 +161,8 @@ pub fn count_base_levels(mut adata: AnnDataContainer) -> Result<AnnDataContainer
 
     // Calculate total coverage using vectorized operations
     let coverage_expr = col("A") + col("T") + col("G") + col("C");
-    adata.var = adata.var
+    adata.var = adata
+        .var
         .lazy()
         .with_columns([coverage_expr.alias("Coverage")])
         .collect()?;
@@ -184,7 +189,8 @@ fn filter_dataframe_by_indices(df: &DataFrame, indices: &[usize]) -> Result<Data
 
     df.filter(&mask_chunked).map_err(|e| {
         crate::call::error::RedicatError::DataProcessing(format!(
-            "Failed to filter DataFrame: {}", e
+            "Failed to filter DataFrame: {}",
+            e
         ))
     })
 }

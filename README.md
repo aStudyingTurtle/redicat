@@ -11,8 +11,7 @@ REDICAT is built on **Rust**, a systems programming language, and is precompiled
 
 The toolkit provides several analysis modules:
 - `bulk`: Calculate depth and nucleotide counts at each base position
-- `bam2mtx`: Convert BAM files to single-cell matrices
-- `preprocess`: Filter BAM files based on various criteria
+- `bam2mtx`: Convert BAM files to single-cell matrices (now supporting an automated two-pass workflow)
 - `call`: RNA editing detection and analysis pipeline
 
 If a metric is missing or performance is lacking, please file a bug/feature ticket in issues.
@@ -35,17 +34,14 @@ wget https://github.com/aStudyingTurtle/redicat/releases/download/latest/redicat
 chmod 777 redicat
 ./redicat
 
-# Filter BAM file
-redicat preprocess --barcodes barcodes.tsv.gz --inbam input.bam --outbam filtered.bam
-
 # Analyze candidate editing sites with stringent filtering (default)
-redicat bulk input.bam -o positions.tsv.gz
+redicat bulk input.bam -o positions.tsv.gz --mapquality 255 --barcodes barcodes.tsv.gz
 
 # Analyze all positions (less stringent filtering)
 redicat bulk --all input.bam -o positions.tsv.gz
 
 # Convert BAM to single-cell base mismatch matrix
-redicat bam2mtx --bam input.bam --tsv positions.tsv.gz --barcodes barcodes.tsv.gz --output matrix.h5ad
+redicat bam2mtx --bam input.bam --barcodes barcodes.tsv.gz --output matrix.h5ad --two-pass
 
 # Call candidate RNA editing events with potiential biological insights and generate the editing events matrix for downstream analyse (ref, alt, others)
 # It is recommand to use site-white-list form some databases like REDiPortal. It is a tsv format table with CHROM and POS column (fitst 2 columns).
@@ -153,10 +149,14 @@ ARGS:
 The `bam2mtx` tool converts BAM files to single-cell matrices. This tool is designed for single-cell RNA-seq or ATAC-seq analysis where you want to generate count matrices from BAM files.
 
 ```bash
-redicat bam2mtx --bam input.bam --tsv positions.tsv --barcodes barcodes.tsv --output output.h5ad
+# Provide existing site list
+redicat bam2mtx --bam input.bam --tsv positions.tsv.gz --barcodes barcodes.tsv.gz --output output.h5ad
+
+# Or let bam2mtx discover sites automatically
+redicat bam2mtx --bam input.bam --barcodes barcodes.tsv.gz --output output.h5ad --two-pass
 ```
 
-The `--tsv` file can be either a plain TSV file or a gzipped TSV file (with `.tsv.gz` extension).
+When未提供 `--tsv` 且启用 `--two-pass`，命令会先运行 `bulk` 生成 `1pass.tsv.gz`，其中会自动应用 `mapquality`、`barcodes` 和 `UB` 过滤。
 
 #### Parameters
 
@@ -168,14 +168,12 @@ Usage:
 Convert BAM files to single-cell matrices
 
 USAGE:
-    redicat bam2mtx [FLAGS] [OPTIONS] --bam <bam> --barcodes <barcodes> --output <output> --tsv <tsv>
+    redicat bam2mtx [OPTIONS] --bam <bam> --barcodes <barcodes> --output <output>
 
 FLAGS:
         --stranded          Whether data is stranded
     -h, --help              Prints help information
-        --large-dataset     Use optimized configuration for large datasets (>10M cells or positions)
-        --memory-efficient  Use memory-efficient configuration for resource-constrained environments
-        --use-mmap          Enable memory-mapped IO for better performance with large files
+        --two-pass          Automatically run bulk to generate a site list prior to matrix construction
     -V, --version           Prints version information
 
 OPTIONS:
@@ -189,40 +187,8 @@ OPTIONS:
     -o, --output <output>              Output path for the H5AD file
         --reference <reference>        Path to reference FASTA file (required for CRAM files)
     -t, --threads <threads>            Number of threads to use [default: 10]
-        --tsv <tsv>                    Path to the TSV file with genomic positions (CHR and POS columns required and must be the first 2 columns). Supports both .tsv and .tsv.gz formats.
+        --tsv <tsv>                    Optional TSV file (CHR/POS columns first). Supports both .tsv and .tsv.gz formats. Required if --two-pass is not used.
         --umi-tag <umi-tag>            UMI tag name [default: UB]
-```
-
-### preprocess
-
-The `preprocess` tool filters BAM files based on barcode whitelist, mapping quality, and SAM flags.
-
-```bash
-redicat preprocess --barcodes whitelist.tsv --inbam input.bam --outbam filtered.bam
-```
-
-Usage:
-
-```text
-Filter BAM files based on various criteria
-
-USAGE:
-    redicat preprocess [FLAGS] [OPTIONS] --barcodes <barcodes> --inbam <inbam> --outbam <outbam>
-
-FLAGS:
-    -h, --help                      Prints help information
-    -V, --version                   Prints version information
-
-OPTIONS:
-        --barcodes <barcodes>                      Path to the barcodes whitelist file (gzip compressed)
-        --exclude-flags <exclude-flags>            SAM flags that must be absent (bit mask)
-        --include-flags <include-flags>            SAM flags that must be present (bit mask)
-        --inbam <inbam>                            Input BAM file path
-        --mapquality <mapquality>                  Minimum mapping quality [default: 255]
-        --outbam <outbam>                          Output BAM file path
-    -t, --threads <threads>                        Number of threads to use [default: 8]
-        --write-cache-size <write-cache-size>      Write cache size for output BAM file [default: 50000]
-
 ```
 
 ### call
@@ -310,7 +276,6 @@ redicat/
 │   ├── commands/            # CLI command implementations
 │   │   ├── base_depth.rs    # Base depth analysis
 │   │   ├── bam2mtx.rs       # BAM to matrix conversion
-│   │   ├── preprocess.rs    # BAM filtering
 │   │   └── call.rs          # RNA editing analysis pipeline
 │   └── lib/                 # Core library modules
 │       ├── bam2mtx/         # BAM to matrix conversion library

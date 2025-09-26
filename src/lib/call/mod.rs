@@ -22,20 +22,18 @@
 
 pub mod anndata_ops;
 pub mod base_matrix;
+pub mod editing;
 pub mod editing_analysis;
 pub mod error;
 pub mod reference_genome;
 pub mod sparse_ops;
-pub mod editing;
 pub mod validation;
 // Re-export main types
-pub use error::{RedicatError, Result};
 pub use anndata_ops::AnnDataContainer;
+pub use editing::{load_rediportal_parallel, EditingType};
 pub use editing_analysis::{
-    annotate_variants_pipeline,
-    calculate_ref_alt_matrices,
-    calculate_cei,
+    annotate_variants_pipeline, calculate_cei, calculate_ref_alt_matrices,
     calculate_site_mismatch_stats,
 };
+pub use error::{RedicatError, Result};
 pub use reference_genome::ReferenceGenome;
-pub use editing::{EditingType, load_rediportal_parallel};

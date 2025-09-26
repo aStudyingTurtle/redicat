@@ -1,7 +1,7 @@
 //! RNA editing type definitions with optimized strand-aware logic
 //!
 //! This module provides the core definitions and functionality for handling
-//! different types of RNA editing events in a strand-aware manner. The 
+//! different types of RNA editing events in a strand-aware manner. The
 //! strand-aware logic ensures proper processing of editing events on both
 //! positive and negative DNA strands by considering the complementary base
 //! pairing rules.
@@ -10,10 +10,10 @@ use crate::call::error::{RedicatError, Result};
 use log::{info, warn};
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::str::FromStr;
-use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditingType {
@@ -36,7 +36,10 @@ impl FromStr for EditingType {
             "ca" => Ok(EditingType::CA),
             "cg" => Ok(EditingType::CG),
             "ct" => Ok(EditingType::CT),
-            _ => Err(format!("Invalid editing type: {}. Valid types: ag, ac, at, ca, cg, ct", s)),
+            _ => Err(format!(
+                "Invalid editing type: {}. Valid types: ag, ac, at, ca, cg, ct",
+                s
+            )),
         }
     }
 }
@@ -56,7 +59,7 @@ impl fmt::Display for EditingType {
 
 impl EditingType {
     /// Get the reference and alternate bases for this editing type
-    /// 
+    ///
     /// Returns the canonical reference and alternate bases for the editing type
     /// on the positive DNA strand.
     pub fn to_bases(&self) -> (char, char) {
@@ -71,11 +74,11 @@ impl EditingType {
     }
 
     /// Get allowed reference bases for both strands (strand-aware)
-    /// 
+    ///
     /// Returns bases that can serve as reference on either positive or negative strand.
     /// This accounts for the complementary nature of DNA strands where the same editing
     /// event can be observed from either strand.
-    /// 
+    ///
     /// For example, A>G editing on the positive strand appears as T>C editing on the
     /// negative strand due to complementary base pairing (A-T and G-C).
     pub fn get_strand_aware_ref_bases(&self) -> [char; 2] {
@@ -90,22 +93,22 @@ impl EditingType {
     }
 
     /// Get the corresponding alt base for a given ref base considering strand
-    /// 
+    ///
     /// This is critical for proper strand-aware editing detection. Given a reference
     /// base observed at a genomic position, this function returns the expected
     /// alternate base based on the editing type and strand orientation.
-    /// 
+    ///
     /// The function handles both positive and negative strand observations by
     /// applying complementary base pairing rules:
     /// - For positive strand: Uses direct editing type definitions
     /// - For negative strand: Uses complementary bases of the editing type
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `ref_base` - The reference base observed at the genomic position
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// The expected alternate base for the given editing type and reference base,
     /// or 'N' if the reference base is not valid for this editing type.
     pub fn get_alt_base_for_ref(&self, ref_base: char) -> char {
@@ -116,42 +119,42 @@ impl EditingType {
                     'T' => 'C', // T>C on negative strand (complement of A>G)
                     _ => 'N',
                 }
-            },
+            }
             EditingType::AC => {
                 match ref_base {
                     'A' => 'C', // A>C on positive strand
                     'T' => 'G', // T>G on negative strand (complement of A>C)
                     _ => 'N',
                 }
-            },
+            }
             EditingType::AT => {
                 match ref_base {
                     'A' => 'T', // A>T on positive strand
                     'T' => 'A', // T>A on negative strand (complement of A>T)
                     _ => 'N',
                 }
-            },
+            }
             EditingType::CA => {
                 match ref_base {
                     'C' => 'A', // C>A on positive strand
                     'G' => 'T', // G>T on negative strand (complement of C>A)
                     _ => 'N',
                 }
-            },
+            }
             EditingType::CG => {
                 match ref_base {
                     'C' => 'G', // C>G on positive strand
                     'G' => 'C', // G>C on negative strand (complement of C>G)
                     _ => 'N',
                 }
-            },
+            }
             EditingType::CT => {
                 match ref_base {
                     'C' => 'T', // C>T on positive strand
                     'G' => 'A', // G>A on negative strand (complement of C>T)
                     _ => 'N',
                 }
-            },
+            }
         }
     }
 
@@ -179,7 +182,10 @@ pub fn load_rediportal_parallel(path: &str) -> Result<HashMap<String, u8>> {
 
     // Validate file exists
     if !std::path::Path::new(path).exists() {
-        return Err(RedicatError::FileNotFound(format!("REDIPortal file not found: {}", path)));
+        return Err(RedicatError::FileNotFound(format!(
+            "REDIPortal file not found: {}",
+            path
+        )));
     }
 
     let file = File::open(path).map_err(|e| {
@@ -200,7 +206,9 @@ pub fn load_rediportal_parallel(path: &str) -> Result<HashMap<String, u8>> {
         .map_err(|e| RedicatError::Io(e))?;
 
     if lines.is_empty() {
-        return Err(RedicatError::EmptyData("REDIPortal file is empty".to_string()));
+        return Err(RedicatError::EmptyData(
+            "REDIPortal file is empty".to_string(),
+        ));
     }
 
     info!("Read {} lines from REDIPortal file", lines.len());
@@ -211,7 +219,7 @@ pub fn load_rediportal_parallel(path: &str) -> Result<HashMap<String, u8>> {
         .skip(1) // Skip header
         .filter_map(|line| {
             let fields: Vec<&str> = line.split('\t').collect();
-            
+
             // Require at least chromosome and position columns
             if fields.len() >= 2 {
                 // Validate position is a valid number
@@ -220,7 +228,7 @@ pub fn load_rediportal_parallel(path: &str) -> Result<HashMap<String, u8>> {
                         // Create key in format "chr:pos" to match var_names format
                         let key = format!("{}:{}", fields[0], fields[1]);
                         Some((key, 1u8))
-                    },
+                    }
                     Err(_) => {
                         warn!("Invalid position in line: {}", line);
                         None
@@ -239,8 +247,11 @@ pub fn load_rediportal_parallel(path: &str) -> Result<HashMap<String, u8>> {
         ));
     }
 
-    info!("Loaded {} editing sites from REDIPortal", editing_sites.len());
-    
+    info!(
+        "Loaded {} editing sites from REDIPortal",
+        editing_sites.len()
+    );
+
     // Log sample of loaded sites for debugging
     if log::log_enabled!(log::Level::Debug) {
         let sample_sites: Vec<&String> = editing_sites.keys().take(5).collect();
@@ -270,8 +281,11 @@ pub fn load_rediportal_with_filters(
                 false
             }
         });
-        info!("Filtered by allowed chromosomes: {} -> {} sites", 
-              original_count, editing_sites.len());
+        info!(
+            "Filtered by allowed chromosomes: {} -> {} sites",
+            original_count,
+            editing_sites.len()
+        );
     }
 
     // Apply minimum chromosome name length filter
@@ -284,8 +298,12 @@ pub fn load_rediportal_with_filters(
                 false
             }
         });
-        info!("Filtered by chromosome name length (>= {}): {} -> {} sites", 
-              min_chromosome_length, before_filter, editing_sites.len());
+        info!(
+            "Filtered by chromosome name length (>= {}): {} -> {} sites",
+            min_chromosome_length,
+            before_filter,
+            editing_sites.len()
+        );
     }
 
     if editing_sites.is_empty() {
@@ -313,11 +331,11 @@ pub fn validate_rediportal_format(path: &str) -> Result<()> {
     };
 
     let mut lines = reader.lines();
-    
+
     // Check if file has at least a header
-    let header = lines.next().ok_or_else(|| {
-        RedicatError::EmptyData("REDIPortal file is empty".to_string())
-    })??;
+    let header = lines
+        .next()
+        .ok_or_else(|| RedicatError::EmptyData("REDIPortal file is empty".to_string()))??;
 
     info!("Header: {}", header);
 
@@ -334,11 +352,12 @@ pub fn validate_rediportal_format(path: &str) -> Result<()> {
                     valid_lines += 1;
                 } else {
                     invalid_lines += 1;
-                    if invalid_lines <= 5 {  // Only log first few invalid lines
+                    if invalid_lines <= 5 {
+                        // Only log first few invalid lines
                         warn!("Invalid line {}: {}", i + 2, line);
                     }
                 }
-            },
+            }
             Err(e) => {
                 return Err(RedicatError::Io(e));
             }
@@ -351,8 +370,10 @@ pub fn validate_rediportal_format(path: &str) -> Result<()> {
         ));
     }
 
-    info!("Validation complete: {} valid lines, {} invalid lines (checked first {} lines)", 
-          valid_lines, invalid_lines, MAX_CHECK_LINES);
+    info!(
+        "Validation complete: {} valid lines, {} invalid lines (checked first {} lines)",
+        valid_lines, invalid_lines, MAX_CHECK_LINES
+    );
 
     if invalid_lines > valid_lines / 2 {
         warn!("High proportion of invalid lines detected. Please check file format.");

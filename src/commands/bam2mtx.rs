@@ -14,11 +14,12 @@
 //! - Memory-efficient processing for large datasets
 //! - Configurable chunk sizes and matrix density estimation
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Result;
+use crate::commands::base_depth::Bulk as BulkCommand;
+use anyhow::{anyhow, Result};
 use rayon::prelude::*;
 use rust_htslib::bam::Read;
 use structopt::StructOpt;
@@ -28,6 +29,7 @@ use redicat_lib::bam2mtx::{
     barcode::BarcodeProcessor,
     processor::{BamProcessorConfig, PositionData, StrandBaseCounts},
 };
+use redicat_lib::utils;
 
 /// Arguments for the bam2mtx command
 #[derive(Debug, StructOpt)]
@@ -37,13 +39,17 @@ pub struct Bam2MtxArgs {
     #[structopt(short, long, parse(from_os_str))]
     pub bam: PathBuf,
 
-    /// Path to the TSV file with genomic positions (CHR and POS columns required)
+    /// Optional TSV file with genomic positions (CHR/POS). 若未提供且启用 two-pass，将自动生成。
     #[structopt(long, parse(from_os_str))]
-    pub tsv: PathBuf,
+    pub tsv: Option<PathBuf>,
 
     /// Path to the cell barcodes file
     #[structopt(long, parse(from_os_str))]
     pub barcodes: PathBuf,
+
+    /// Enable two-pass模式：先运行 `bulk` 生成 1pass.tsv.gz，再执行 bam2mtx。
+    #[structopt(long)]
+    pub two_pass: bool,
 
     /// Output path for the H5AD file
     #[structopt(short, long, parse(from_os_str))]
@@ -84,27 +90,10 @@ pub struct Bam2MtxArgs {
     #[structopt(long, default_value = "2500")]
     pub chunksize: u32,
 
-    /// Matrix density estimation for memory optimization
+    /// Matrix density estimation for memory优化
     /// Typical values: sparse matrix 0.001-0.01, medium density 0.01-0.1, dense matrix 0.1+
     #[structopt(long, default_value = "0.005")]
     pub matrix_density: f64,
-
-    /// Enable memory-mapped IO for better performance with large files
-    /// Recommended: enable for large files (>1GB), disable for small files to avoid system call overhead
-    /// Default: enabled
-    #[structopt(long)]
-    pub use_mmap: bool,
-
-
-    /// Use optimized configuration for large datasets (>10M cells or positions)
-    /// Automatically adjusts chunk_size=25000, matrix_density=0.005, use_mmap=true, batch_size=2000
-    #[structopt(long)]
-    pub large_dataset: bool,
-
-    /// Use memory-efficient configuration for resource-constrained environments
-    /// Automatically adjusts threads=half, chunk_size=8000, use_mmap=false, batch_size=500
-    #[structopt(long)]
-    pub memory_efficient: bool,
 }
 
 /// Represents a genomic position from TSV file
@@ -115,19 +104,20 @@ pub struct GenomicPosition {
 }
 
 /// Chunk of genomic positions for parallel processing
-#[derive(Debug, Clone)]  // 添加 Clone trait
+#[derive(Debug, Clone)] // 添加 Clone trait
 pub struct PositionChunk {
     pub positions: Vec<GenomicPosition>,
 }
 
 /// Read TSV file with streaming parser for better memory efficiency
-fn read_tsv_file(tsv_path: &PathBuf) -> Result<Vec<GenomicPosition>> {
+fn read_tsv_file<P: AsRef<Path>>(tsv_path: P) -> Result<Vec<GenomicPosition>> {
     use flate2::read::GzDecoder;
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
-    let file = File::open(tsv_path)?;
-    let reader: Box<dyn BufRead> = if tsv_path.extension().map_or(false, |ext| ext == "gz") {
+    let path = tsv_path.as_ref();
+    let file = File::open(path)?;
+    let reader: Box<dyn BufRead> = if path.extension().map_or(false, |ext| ext == "gz") {
         let decoder = GzDecoder::new(file);
         Box::new(BufReader::with_capacity(256 * 1024, decoder)) // Larger buffer
     } else {
@@ -292,6 +282,9 @@ impl OptimizedChunkProcessor {
                 }
 
                 let umi = self.get_umi(&record)?;
+                if umi == "-" {
+                    continue;
+                }
                 let base = self.get_base_at_position(&record, alignment.qpos())?;
                 let strand = if record.is_reverse() { "-" } else { "+" };
 
@@ -380,10 +373,7 @@ impl OptimizedChunkProcessor {
         Ok(true)
     }
 
-    fn get_cell_barcode(
-        &self,
-        record: &rust_htslib::bam::record::Record,
-    ) -> Result<String> {
+    fn get_cell_barcode(&self, record: &rust_htslib::bam::record::Record) -> Result<String> {
         let tag = self.config.cell_barcode_tag.as_bytes();
         match record.aux(tag) {
             Ok(rust_htslib::bam::record::Aux::String(s)) => {
@@ -404,10 +394,7 @@ impl OptimizedChunkProcessor {
         }
     }
 
-    fn get_umi(
-        &self,
-        record: &rust_htslib::bam::record::Record,
-    ) -> Result<String> {
+    fn get_umi(&self, record: &rust_htslib::bam::record::Record) -> Result<String> {
         let tag = self.config.umi_tag.as_bytes();
         match record.aux(tag) {
             Ok(rust_htslib::bam::record::Aux::String(s)) => Ok(s.to_string()),
@@ -447,70 +434,56 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
 
     log::info!("Starting optimized bam2mtx processing...");
     log::info!("BAM file: {:?}", args.bam);
-    log::info!("TSV file: {:?}", args.tsv);
-    log::info!("Barcodes file: {:?}", args.barcodes);
+    log::info!("Barcode whitelist: {:?}", args.barcodes);
     log::info!("Output file: {:?}", args.output);
+    if args.two_pass {
+        log::info!("Two-pass mode enabled: running bulk first pass to build site list");
+    }
 
-    // Initialize thread pool early to avoid conflicts
+    let positions_path = prepare_positions_file(&args)?;
+    log::info!("Using position list: {:?}", positions_path);
+
     if let Err(e) = rayon::ThreadPoolBuilder::new()
         .num_threads(args.threads)
-        .build_global() 
+        .build_global()
     {
         log::debug!("Thread pool already initialized: {}", e);
     }
 
-    // Load cell barcodes and get data size estimates
     log::info!("Loading cell barcodes...");
     let barcode_processor = Arc::new(BarcodeProcessor::from_file(&args.barcodes)?);
     let estimated_cells = barcode_processor.len();
     log::info!("Loaded {} valid cell barcodes", estimated_cells);
 
-    // Read TSV to estimate data size
     log::info!("Reading TSV file...");
-    let positions = read_tsv_file(&args.tsv)?;
+    let positions = read_tsv_file(&positions_path)?;
     let estimated_positions = positions.len();
     log::info!("Loaded {} positions from TSV", estimated_positions);
 
-    // 配置策略
-    let adata_config = if args.large_dataset {
-        log::info!("Using user-specified large dataset configuration");
-        // 使用大数据库配置（手动设置参数）
-        AnnDataConfig {
-            stranded: args.stranded,
-            compression: Some("gzip".to_string()),
-            threads: args.threads,
-            chunk_size: 25000,      // 大数据集优化的chunk size
-            matrix_density: 0.005,  // 大数据集通常更稀疏
-            use_mmap: true,         // 大文件受益于mmap
-            batch_size: args.chunksize as usize, // 与chunksize保持一致
-        }
-    } else if args.memory_efficient {
-        log::info!("Using user-specified memory efficient configuration");
-        // 使用内存效率优化配置（手动设置参数）
-        AnnDataConfig {
-            stranded: args.stranded,
-            compression: Some("gzip".to_string()),
-            threads: std::cmp::max(1, args.threads / 2), // 减少线程数降低内存
-            chunk_size: 8000,       // 较小的chunk减少内存峰值
-            matrix_density: 0.01,   // 保守的密度估计
-            use_mmap: false,        // 避免mmap的内存映射开销
-            batch_size: args.chunksize as usize, // 与chunksize保持一致
-        }
+    if estimated_positions == 0 {
+        return Err(anyhow!(
+            "Position list {:?} contains no usable entries",
+            positions_path
+        ));
+    }
+
+    let auto_use_mmap = estimated_positions >= 1_000_000 || estimated_cells >= 200_000;
+    let chunk_size = if auto_use_mmap {
+        std::cmp::max(args.chunksize as usize, 10_000)
     } else {
-        log::info!("Using default configuration with user overrides");
-        // 使用默认配置并应用用户指定的参数覆盖
-        AnnDataConfig {
-            stranded: args.stranded,
-            compression: Some("gzip".to_string()),
-            threads: args.threads,
-            chunk_size: args.chunksize as usize,
-            matrix_density: args.matrix_density,
-            use_mmap: args.use_mmap,
-            batch_size: args.chunksize as usize, // 与chunksize保持一致
-        }
+        args.chunksize as usize
     };
 
-    // 输出最终使用的配置
+    let adata_config = AnnDataConfig {
+        stranded: args.stranded,
+        compression: Some("gzip".to_string()),
+        threads: args.threads,
+        chunk_size,
+        matrix_density: args.matrix_density,
+        use_mmap: auto_use_mmap,
+        batch_size: chunk_size,
+    };
+
     log::info!("Configuration summary:");
     log::info!("  - Threads: {}", adata_config.threads);
     log::info!("  - Chunk size: {}", adata_config.chunk_size);
@@ -519,7 +492,6 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     log::info!("  - Batch size: {}", adata_config.batch_size);
     log::info!("  - Stranded: {}", adata_config.stranded);
 
-    // Configure processor
     let config = BamProcessorConfig {
         min_mapping_quality: args.min_mapq,
         min_base_quality: args.min_baseq,
@@ -529,22 +501,20 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     };
 
     let chunks = chunk_positions(positions, adata_config.chunk_size);
-    let total_chunks = chunks.len(); // 提前保存 chunks 的长度
+    let total_chunks = chunks.len();
     log::info!("Split into {} chunks for parallel processing", total_chunks);
 
-    // Create optimized processor
     let processor = OptimizedChunkProcessor::new(args.bam.clone(), config, barcode_processor);
 
-    // Process chunks with progress tracking
     log::info!("Processing {} chunks...", total_chunks);
     let processing_start = Instant::now();
-    
-    let all_results: Vec<Vec<PositionData>> = chunks  // 直接使用 chunks，不需要借用
+
+    let all_results: Vec<Vec<PositionData>> = chunks
         .into_par_iter()
         .enumerate()
         .map(|(idx, chunk)| {
             if idx % 50 == 0 {
-                log::debug!("Processing chunk {} of {}", idx + 1, total_chunks); // 使用之前保存的值
+                log::debug!("Processing chunk {} of {}", idx + 1, total_chunks);
             }
             processor.process_chunk(&chunk).unwrap_or_default()
         })
@@ -553,7 +523,6 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     let processing_duration = processing_start.elapsed();
     log::info!("Chunk processing completed in {:?}", processing_duration);
 
-    // Flatten results efficiently
     let total_length: usize = all_results.iter().map(|v| v.len()).sum();
     let mut all_position_data = Vec::with_capacity(total_length);
     for chunk_result in all_results {
@@ -561,12 +530,10 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     }
     log::info!("Processed {} positions total", all_position_data.len());
 
-    // Convert to AnnData
     log::info!("Converting to AnnData format...");
     let converter = AnnDataConverter::new(adata_config);
     let adata = converter.convert(&all_position_data, &args.output)?;
 
-    // Write output
     log::info!("Writing output file...");
     converter.write_to_file(&adata, &args.output)?;
 
@@ -577,6 +544,52 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     Ok(())
 }
 
+fn prepare_positions_file(args: &Bam2MtxArgs) -> Result<PathBuf> {
+    if args.two_pass {
+        let target_path = args.tsv.clone().unwrap_or_else(|| {
+            args.output
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("1pass.tsv.gz")
+        });
+        run_bulk_first_pass(args, &target_path)?;
+        Ok(target_path)
+    } else {
+        args.tsv
+            .clone()
+            .ok_or_else(|| anyhow!("--tsv must be provided unless --two-pass is enabled"))
+    }
+}
+
+fn run_bulk_first_pass(args: &Bam2MtxArgs, target: &Path) -> Result<()> {
+    log::info!("Running bulk first pass to generate {:?}", target);
+    utils::make_parent_dirs(target)?;
+
+    let mut cli = vec![
+        "bulk".to_string(),
+        args.bam.to_string_lossy().into_owned(),
+        "-o".to_string(),
+        target.to_string_lossy().into_owned(),
+        "--mapquality".to_string(),
+        args.min_mapq.to_string(),
+        "-t".to_string(),
+        args.threads.to_string(),
+        "-c".to_string(),
+        args.chunksize.to_string(),
+        "-Q".to_string(),
+        args.min_baseq.to_string(),
+        "--all".to_string(),
+    ];
+
+    cli.push("--barcodes".to_string());
+    cli.push(args.barcodes.to_string_lossy().into_owned());
+
+    let cli_refs: Vec<&str> = cli.iter().map(|s| s.as_str()).collect();
+    let bulk_args = BulkCommand::from_iter_safe(&cli_refs)?;
+    bulk_args.run()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,17 +598,22 @@ mod tests {
     fn test_bam2mtx_args() {
         let args = Bam2MtxArgs::from_iter_safe(&[
             "test",
-            "--bam", "test.bam",
-            "--tsv", "test.tsv", 
-            "--barcodes", "barcodes.tsv",
-            "--output", "output.h5ad",
-        ]).unwrap();
+            "--bam",
+            "test.bam",
+            "--tsv",
+            "test.tsv",
+            "--barcodes",
+            "barcodes.tsv",
+            "--output",
+            "output.h5ad",
+        ])
+        .unwrap();
 
         assert_eq!(args.bam, PathBuf::from("test.bam"));
-        assert_eq!(args.tsv, PathBuf::from("test.tsv"));
+        assert_eq!(args.tsv, Some(PathBuf::from("test.tsv")));
         assert_eq!(args.barcodes, PathBuf::from("barcodes.tsv"));
         assert_eq!(args.output, PathBuf::from("output.h5ad"));
         assert_eq!(args.matrix_density, 0.005);
-        assert!(!args.use_mmap); // default is false without --mmap flag
+        assert!(!args.two_pass);
     }
 }

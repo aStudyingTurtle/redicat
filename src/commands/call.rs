@@ -36,12 +36,12 @@ use std::sync::Arc;
 use structopt::StructOpt;
 
 use redicat_lib::call::anndata_ops::{read_anndata_h5ad, write_anndata_h5ad};
-use redicat_lib::call::editing::load_rediportal_parallel;
-use redicat_lib::call::editing::EditingType;
-use redicat_lib::call::calculate_site_mismatch_stats;
+use redicat_lib::call::annotate_variants_pipeline;
 use redicat_lib::call::calculate_cei;
 use redicat_lib::call::calculate_ref_alt_matrices;
-use redicat_lib::call::annotate_variants_pipeline;
+use redicat_lib::call::calculate_site_mismatch_stats;
+use redicat_lib::call::editing::load_rediportal_parallel;
+use redicat_lib::call::editing::EditingType;
 use redicat_lib::call::error::RedicatError;
 use redicat_lib::call::reference_genome::ReferenceGenome;
 use redicat_lib::call::validation::{validate_input_files, validate_output_path, ValidationConfig};
@@ -117,7 +117,7 @@ pub struct CallArgs {
 
 impl CallArgs {
     /// Validate command line arguments and input files
-    /// 
+    ///
     /// This function performs several validation steps:
     /// 1. Validates configuration parameters
     /// 2. Validates input files exist and are readable
@@ -155,19 +155,19 @@ impl CallArgs {
 }
 
 /// Main entry point for the RNA editing analysis pipeline
-/// 
+///
 /// This function orchestrates the entire REDICAT analysis workflow:
 /// 1. Validates command line arguments
 /// 2. Configures the thread pool for parallel processing
 /// 3. Executes the main analysis pipeline
 /// 4. Handles errors and logs results
-/// 
+///
 /// # Arguments
-/// 
+///
 /// * `args` - Command line arguments parsed into CallArgs struct
-/// 
+///
 /// # Returns
-/// 
+///
 /// * `Result<()>` - Ok if successful, Err with error details if failed
 pub fn run_call(args: CallArgs) -> Result<()> {
     info!("Starting REDICAT analysis pipeline");
@@ -211,7 +211,7 @@ pub fn run_call(args: CallArgs) -> Result<()> {
 }
 
 /// Execute the main analysis pipeline
-/// 
+///
 /// This function performs the core RNA editing analysis steps with strand-aware processing:
 /// 1. Reads the input AnnData file
 /// 2. Loads reference genome and editing site data
@@ -220,17 +220,17 @@ pub fn run_call(args: CallArgs) -> Result<()> {
 /// 5. Computes the Cell Editing Index (CEI)
 /// 6. Calculates site-level mismatch statistics
 /// 7. Writes the results to an output file
-/// 
+///
 /// The analysis is performed in a strand-aware manner to correctly handle RNA editing
-/// events on both positive and negative DNA strands. This ensures comprehensive 
+/// events on both positive and negative DNA strands. This ensures comprehensive
 /// detection of editing events regardless of the DNA strand they originate from.
-/// 
+///
 /// # Arguments
-/// 
+///
 /// * `args` - Reference to CallArgs containing pipeline parameters
-/// 
+///
 /// # Returns
-/// 
+///
 /// * `Result<(), RedicatError>` - Ok if successful, Err with error details if failed
 fn run_analysis(args: &CallArgs) -> Result<(), RedicatError> {
     info!("Reading input AnnData file: {}", args.input);

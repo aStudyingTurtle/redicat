@@ -17,12 +17,20 @@
 use anyhow::Result;
 use log::*;
 use redicat_lib::{
+    bam2mtx::barcode::BarcodeProcessor,
     par_granges::{self, RegionProcessor},
     position::pileup_position::PileupPosition,
+    read_filter::{DefaultReadFilter, ReadFilter},
     utils,
 };
-use rust_htslib::{bam, bam::Read, bam::record::Record, bam::pileup::Alignment};
+use rust_htslib::{
+    bam,
+    bam::pileup::Alignment,
+    bam::record::{Aux, Record},
+    bam::Read,
+};
 use std::cmp::max;
+use std::sync::Arc;
 use std::{convert::TryInto, path::PathBuf};
 use structopt::StructOpt;
 
@@ -49,6 +57,14 @@ pub struct Bulk {
     /// quality score it will instead be counted as an `N`. If nothing is set for this to 30.
     #[structopt(long, short = "Q")]
     min_baseq: Option<u8>,
+
+    /// Minimum mapping quality for reads to be counted (default matches legacy preprocess).
+    #[structopt(long, default_value = "255")]
+    mapquality: u8,
+
+    /// Optional barcode whitelist (gzipped or plain text). When未提供时不依据 CB/UB 过滤。
+    #[structopt(long, parse(from_os_str))]
+    barcodes: Option<PathBuf>,
 
     /// Output positions as 0-based instead of 1-based.
     #[structopt(long, short = "z")]
@@ -92,9 +108,24 @@ impl Bulk {
             &Some(output_path),
             true, // Always use compression
             true,
-            1,    // Single-threaded compression
-            6,    // Default compression level
+            1, // Single-threaded compression
+            6, // Default compression level
         )?;
+
+        let barcode_processor = match &self.barcodes {
+            Some(path) => {
+                info!("Loading barcode whitelist: {:?}", path);
+                let processor = Arc::new(BarcodeProcessor::from_file(path)?);
+                info!("Loaded {} barcodes", processor.len());
+                Some(processor)
+            }
+            None => None,
+        };
+
+        let read_filter = Arc::new(BulkReadFilter::new(
+            self.mapquality,
+            barcode_processor.clone(),
+        ));
 
         let base_processor = BaseProcessor::new(
             self.reads.clone(),
@@ -105,6 +136,7 @@ impl Bulk {
             self.min_baseq,
             !self.all, // Use edited filtering logic based on command line parameter (inverted: --all means less stringent)
             self.editing_threshold,
+            read_filter,
         );
 
         let par_granges_runner = par_granges::ParGranges::new(
@@ -148,6 +180,8 @@ struct BaseProcessor {
     edited: bool,
     /// editing threshold for valid value calculation
     editing_threshold: u32,
+    /// composite read filter (MAPQ + optional barcode/UMI)
+    read_filter: Arc<BulkReadFilter>,
 }
 
 impl BaseProcessor {
@@ -161,6 +195,7 @@ impl BaseProcessor {
         min_baseq: Option<u8>,
         edited: bool,
         editing_threshold: u32,
+        read_filter: Arc<BulkReadFilter>,
     ) -> Self {
         let min_baseq = min_baseq.or(Some(30u8));
         Self {
@@ -172,6 +207,7 @@ impl BaseProcessor {
             min_baseq,
             edited,
             editing_threshold,
+            read_filter,
         }
     }
 }
@@ -204,18 +240,10 @@ impl RegionProcessor for BaseProcessor {
             let pileup = p.expect("Extracted a pileup");
             // Verify that we are within the bounds of the chunk we are iterating on
             if pileup.pos() >= start && pileup.pos() < stop {
-                // Use a dummy filter that passes all reads since filtering is now handled in preprocessing
-                struct DummyFilter;
-                impl redicat_lib::read_filter::ReadFilter for DummyFilter {
-                    fn filter_read(&self, _read: &Record, _alignment: Option<&Alignment>) -> bool {
-                        true
-                    }
-                }
-                let dummy_filter = DummyFilter;
                 let mut pos = PileupPosition::from_pileup(
                     pileup,
                     &header,
-                    &dummy_filter,
+                    &*self.read_filter,
                     self.min_baseq,
                 );
                 pos.pos += self.coord_base;
@@ -253,10 +281,85 @@ impl RegionProcessor for BaseProcessor {
     }
 }
 
+struct BulkReadFilter {
+    inner: DefaultReadFilter,
+    barcode_processor: Option<Arc<BarcodeProcessor>>,
+}
+
+impl BulkReadFilter {
+    fn new(mapquality: u8, barcode_processor: Option<Arc<BarcodeProcessor>>) -> Self {
+        Self {
+            inner: DefaultReadFilter::new(0, 0, mapquality),
+            barcode_processor,
+        }
+    }
+
+    fn clean_tag_string(tag: Aux) -> Option<String> {
+        match tag {
+            Aux::String(value) => Some(value.split('-').next().unwrap_or(value).to_string()),
+            Aux::ArrayU8(array) => {
+                let bytes: Vec<u8> = array.iter().collect();
+                std::str::from_utf8(&bytes)
+                    .ok()
+                    .map(|s| s.split('-').next().unwrap_or(s).to_string())
+            }
+            _ => None,
+        }
+    }
+
+    fn tag_as_string(tag: Aux) -> Option<String> {
+        match tag {
+            Aux::String(value) => Some(value.to_string()),
+            Aux::ArrayU8(array) => {
+                let bytes: Vec<u8> = array.iter().collect();
+                std::str::from_utf8(&bytes).ok().map(|s| s.to_string())
+            }
+            _ => None,
+        }
+    }
+}
+
+impl ReadFilter for BulkReadFilter {
+    fn filter_read(&self, read: &Record, alignment: Option<&Alignment>) -> bool {
+        if !self.inner.filter_read(read, alignment) {
+            return false;
+        }
+
+        if let Some(processor) = &self.barcode_processor {
+            let barcode_valid = match read.aux(b"CB") {
+                Ok(tag) => match Self::clean_tag_string(tag) {
+                    Some(cb) => processor.is_valid(&cb),
+                    None => false,
+                },
+                Err(_) => false,
+            };
+
+            if !barcode_valid {
+                return false;
+            }
+
+            let umi_valid = match read.aux(b"UB") {
+                Ok(tag) => match Self::tag_as_string(tag) {
+                    Some(umi) => umi != "-" && !umi.is_empty(),
+                    None => false,
+                },
+                Err(_) => false,
+            };
+
+            if !umi_valid {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     #[test]
     fn test_process_region_chr22() {
@@ -271,15 +374,17 @@ mod tests {
         }
 
         // Create a BaseProcessor
+        let read_filter = Arc::new(BulkReadFilter::new(255, None));
         let processor = BaseProcessor::new(
             test_bam_path,
-            1, // 1-based coordinates
+            1,        // 1-based coordinates
             10000,    // max_depth
             10,       // min_depth
             20,       // max_n_fraction
             Some(30), // min_baseq
             false,    // edited
             1000,     // editing_threshold
+            read_filter,
         );
 
         // Process the region chr22:11252003-11252024 (0-based coordinates would be 11252002-11252024)

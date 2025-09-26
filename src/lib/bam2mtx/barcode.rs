@@ -19,7 +19,7 @@ impl BarcodeProcessor {
     /// Create a new BarcodeProcessor from a file containing barcodes
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         use std::collections::HashSet;
-        
+
         let path = path.as_ref();
         let file = File::open(path)?;
 

@@ -2,9 +2,9 @@
 
 use crate::bam2mtx::processor::PositionData;
 use anndata::{AnnData, AnnDataOp, AxisArraysOp};
-use log::info;
 use anndata_hdf5::H5;
 use anyhow::Result;
+use log::info;
 use nalgebra_sparse::coo::CooMatrix;
 use nalgebra_sparse::csr::CsrMatrix;
 use rayon::prelude::*;
@@ -41,8 +41,8 @@ impl Default for AnnDataConfig {
             threads: num_cpus::get(),
             chunk_size: 15000,    // Medium size balancing memory and performance
             matrix_density: 0.01, // Typical sparsity for single-cell data
-            use_mmap: false,      // Disabled by default to avoid system call overhead for small files
-            batch_size: 1000,     // Moderate batch size
+            use_mmap: false, // Disabled by default to avoid system call overhead for small files
+            batch_size: 1000, // Moderate batch size
         }
     }
 }

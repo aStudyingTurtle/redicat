@@ -9,7 +9,7 @@ use anndata::{
     AnnData, Backend,
 };
 use anndata_hdf5::H5;
-use log::{info, warn, debug};
+use log::{debug, info, warn};
 use nalgebra_sparse::CsrMatrix;
 use polars::prelude::*;
 use std::collections::HashMap;
@@ -33,14 +33,16 @@ impl AnnDataContainer {
     pub fn new(n_obs: usize, n_vars: usize) -> Self {
         let obs_names: Vec<String> = (0..n_obs).map(|i| format!("cell_{}", i)).collect();
         let var_names: Vec<String> = (0..n_vars).map(|i| format!("gene_{}", i)).collect();
-        
+
         let obs = DataFrame::new(vec![
             Series::new("obs_names".into(), obs_names.clone()).into()
-        ]).unwrap();
-        
+        ])
+        .unwrap();
+
         let var = DataFrame::new(vec![
             Series::new("var_names".into(), var_names.clone()).into()
-        ]).unwrap();
+        ])
+        .unwrap();
 
         Self {
             obs,
@@ -60,10 +62,13 @@ impl AnnDataContainer {
             Some(matrix) => {
                 debug!("Computing row sums for layer: {}", layer_name);
                 Some(SparseOps::compute_row_sums(matrix))
-            },
+            }
             None => {
-                warn!("Layer '{}' not found. Available layers: {:?}", 
-                      layer_name, self.layers.keys().collect::<Vec<_>>());
+                warn!(
+                    "Layer '{}' not found. Available layers: {:?}",
+                    layer_name,
+                    self.layers.keys().collect::<Vec<_>>()
+                );
                 None
             }
         }
@@ -75,10 +80,13 @@ impl AnnDataContainer {
             Some(matrix) => {
                 debug!("Computing column sums for layer: {}", layer_name);
                 Some(SparseOps::compute_col_sums(matrix))
-            },
+            }
             None => {
-                warn!("Layer '{}' not found. Available layers: {:?}", 
-                      layer_name, self.layers.keys().collect::<Vec<_>>());
+                warn!(
+                    "Layer '{}' not found. Available layers: {:?}",
+                    layer_name,
+                    self.layers.keys().collect::<Vec<_>>()
+                );
                 None
             }
         }
@@ -109,19 +117,16 @@ impl AnnDataContainer {
         }
 
         // Sum matrices efficiently using nalgebra_sparse operations
-        let total_matrix = matrices
-            .into_iter()
-            .fold(None, |acc: Option<CsrMatrix<u32>>, matrix| {
-                match acc {
+        let total_matrix =
+            matrices
+                .into_iter()
+                .fold(None, |acc: Option<CsrMatrix<u32>>, matrix| match acc {
                     None => Some(matrix.clone()),
-                    Some(existing) => {
-                        SparseOps::add_matrices(&existing, matrix)
-                            .map_err(|e| warn!("Failed to add matrices: {}", e))
-                            .ok()
-                            .or(Some(existing))
-                    }
-                }
-            });
+                    Some(existing) => SparseOps::add_matrices(&existing, matrix)
+                        .map_err(|e| warn!("Failed to add matrices: {}", e))
+                        .ok()
+                        .or(Some(existing)),
+                });
 
         match total_matrix {
             Some(matrix) => SparseOps::compute_row_sums(&matrix),
@@ -153,13 +158,19 @@ impl AnnDataContainer {
         // For obs and var DataFrames, allow them to be empty or have different heights
         // as long as they can be reconstructed from the names
         if !self.obs.is_empty() && self.obs.height() != self.n_obs {
-            warn!("obs DataFrame height ({}) doesn't match n_obs ({}), will use obs_names", 
-                  self.obs.height(), self.n_obs);
+            warn!(
+                "obs DataFrame height ({}) doesn't match n_obs ({}), will use obs_names",
+                self.obs.height(),
+                self.n_obs
+            );
         }
 
         if !self.var.is_empty() && self.var.height() != self.n_vars {
-            warn!("var DataFrame height ({}) doesn't match n_vars ({}), will use var_names", 
-                  self.var.height(), self.n_vars);
+            warn!(
+                "var DataFrame height ({}) doesn't match n_vars ({}), will use var_names",
+                self.var.height(),
+                self.n_vars
+            );
         }
 
         // Check X matrix dimensions if present
@@ -177,7 +188,12 @@ impl AnnDataContainer {
             if matrix.nrows() != self.n_obs || matrix.ncols() != self.n_vars {
                 return Err(RedicatError::DimensionMismatch {
                     expected: format!("Layer '{}' {}×{}", layer_name, self.n_obs, self.n_vars),
-                    actual: format!("Layer '{}' {}×{}", layer_name, matrix.nrows(), matrix.ncols()),
+                    actual: format!(
+                        "Layer '{}' {}×{}",
+                        layer_name,
+                        matrix.nrows(),
+                        matrix.ncols()
+                    ),
                 });
             }
         }
@@ -189,18 +205,28 @@ impl AnnDataContainer {
     pub fn fix_dataframe_dimensions(&mut self) -> Result<()> {
         // Fix obs DataFrame if needed
         if self.obs.is_empty() || self.obs.height() != self.n_obs {
-            info!("Reconstructing obs DataFrame with {} observations", self.n_obs);
-            self.obs = DataFrame::new(vec![
-                Series::new("obs_names".into(), self.obs_names.clone()).into()
-            ])?;
+            info!(
+                "Reconstructing obs DataFrame with {} observations",
+                self.n_obs
+            );
+            self.obs = DataFrame::new(vec![Series::new(
+                "obs_names".into(),
+                self.obs_names.clone(),
+            )
+            .into()])?;
         }
 
         // Fix var DataFrame if needed
         if self.var.is_empty() || self.var.height() != self.n_vars {
-            info!("Reconstructing var DataFrame with {} variables", self.n_vars);
-            self.var = DataFrame::new(vec![
-                Series::new("var_names".into(), self.var_names.clone()).into()
-            ])?;
+            info!(
+                "Reconstructing var DataFrame with {} variables",
+                self.n_vars
+            );
+            self.var = DataFrame::new(vec![Series::new(
+                "var_names".into(),
+                self.var_names.clone(),
+            )
+            .into()])?;
         }
 
         Ok(())
@@ -216,7 +242,10 @@ impl AnnDataContainer {
 
         // X matrix size
         if let Some(ref x_matrix) = self.x {
-            stats.insert("x_bytes".to_string(), estimate_csr_matrix_size_f64(x_matrix));
+            stats.insert(
+                "x_bytes".to_string(),
+                estimate_csr_matrix_size_f64(x_matrix),
+            );
         }
 
         // Layer sizes
@@ -259,10 +288,12 @@ pub fn write_anndata_h5ad(adata: &AnnDataContainer, path: &str) -> Result<()> {
 
     // Log memory usage
     let stats = adata_copy.get_memory_stats();
-    info!("Memory usage: obs={} KB, var={} KB, layers={} KB", 
-          stats.get("obs_bytes").unwrap_or(&0) / 1024,
-          stats.get("var_bytes").unwrap_or(&0) / 1024,
-          stats.get("total_layer_bytes").unwrap_or(&0) / 1024);
+    info!(
+        "Memory usage: obs={} KB, var={} KB, layers={} KB",
+        stats.get("obs_bytes").unwrap_or(&0) / 1024,
+        stats.get("var_bytes").unwrap_or(&0) / 1024,
+        stats.get("total_layer_bytes").unwrap_or(&0) / 1024
+    );
 
     let h5_adata = AnnData::<H5>::new(Path::new(path))?;
 
@@ -276,12 +307,19 @@ pub fn write_anndata_h5ad(adata: &AnnDataContainer, path: &str) -> Result<()> {
     if let Some(ref x_matrix) = adata_copy.x {
         let x_f32 = convert_f64_to_f32_csr(x_matrix)?;
         h5_adata.set_x(x_f32)?;
-        info!("  - Written X matrix: {}×{} with {} non-zeros", 
-              x_matrix.nrows(), x_matrix.ncols(), x_matrix.nnz());
+        info!(
+            "  - Written X matrix: {}×{} with {} non-zeros",
+            x_matrix.nrows(),
+            x_matrix.ncols(),
+            x_matrix.nnz()
+        );
     } else {
         let zero_matrix = CsrMatrix::<f32>::zeros(adata_copy.n_obs, adata_copy.n_vars);
         h5_adata.set_x(zero_matrix)?;
-        info!("  - Written empty X matrix: {}×{}", adata_copy.n_obs, adata_copy.n_vars);
+        info!(
+            "  - Written empty X matrix: {}×{}",
+            adata_copy.n_obs, adata_copy.n_vars
+        );
     }
 
     // Set layers with priority order for important layers
@@ -291,8 +329,13 @@ pub fn write_anndata_h5ad(adata: &AnnDataContainer, path: &str) -> Result<()> {
     // Write priority layers first
     for layer_name in &priority_layers {
         if let Some(layer_matrix) = adata_copy.layers.get(*layer_name) {
-            info!("  - Writing layer: {} ({}×{}, {} non-zeros)", 
-                  layer_name, layer_matrix.nrows(), layer_matrix.ncols(), layer_matrix.nnz());
+            info!(
+                "  - Writing layer: {} ({}×{}, {} non-zeros)",
+                layer_name,
+                layer_matrix.nrows(),
+                layer_matrix.ncols(),
+                layer_matrix.nnz()
+            );
             let f32_matrix = convert_u32_to_f32_csr(layer_matrix)?;
             h5_adata.layers().add(layer_name, f32_matrix)?;
             written_layers += 1;
@@ -302,7 +345,7 @@ pub fn write_anndata_h5ad(adata: &AnnDataContainer, path: &str) -> Result<()> {
     // // Write remaining layers
     // for (layer_name, layer_matrix) in &adata_copy.layers {
     //     if !priority_layers.contains(&layer_name.as_str()) {
-    //         info!("  - Writing layer: {} ({}×{}, {} non-zeros)", 
+    //         info!("  - Writing layer: {} ({}×{}, {} non-zeros)",
     //               layer_name, layer_matrix.nrows(), layer_matrix.ncols(), layer_matrix.nnz());
     //         let f32_matrix = convert_u32_to_f32_csr(layer_matrix)?;
     //         h5_adata.layers().add(layer_name, f32_matrix)?;
@@ -313,21 +356,29 @@ pub fn write_anndata_h5ad(adata: &AnnDataContainer, path: &str) -> Result<()> {
     // Set annotations
     if !adata_copy.obs.is_empty() {
         h5_adata.set_obs(adata_copy.obs.clone())?;
-        info!("  - Written obs annotations: {} rows, {} columns", 
-              adata_copy.obs.height(), adata_copy.obs.width());
+        info!(
+            "  - Written obs annotations: {} rows, {} columns",
+            adata_copy.obs.height(),
+            adata_copy.obs.width()
+        );
     }
-    
+
     if !adata_copy.var.is_empty() {
         h5_adata.set_var(adata_copy.var.clone())?;
-        info!("  - Written var annotations: {} rows, {} columns", 
-              adata_copy.var.height(), adata_copy.var.width());
+        info!(
+            "  - Written var annotations: {} rows, {} columns",
+            adata_copy.var.height(),
+            adata_copy.var.width()
+        );
     }
 
     h5_adata.set_n_obs(adata_copy.n_obs)?;
     h5_adata.set_n_vars(adata_copy.n_vars)?;
 
-    info!("Successfully wrote AnnData with shape: {} × {}, {} layers", 
-          adata_copy.n_obs, adata_copy.n_vars, written_layers);
+    info!(
+        "Successfully wrote AnnData with shape: {} × {}, {} layers",
+        adata_copy.n_obs, adata_copy.n_vars, written_layers
+    );
     Ok(())
 }
 
@@ -342,23 +393,25 @@ pub fn read_anndata_h5ad(path: &str) -> Result<AnnDataContainer> {
         )));
     }
 
-    let adata = AnnData::<H5>::open(H5::open(path).map_err(|e| {
-        RedicatError::DataProcessing(format!("Failed to open H5 file: {:?}", e))
-    })?)?;
+    let adata =
+        AnnData::<H5>::open(H5::open(path).map_err(|e| {
+            RedicatError::DataProcessing(format!("Failed to open H5 file: {:?}", e))
+        })?)?;
 
     let n_obs = adata.n_obs();
     let n_vars = adata.n_vars();
     info!("AnnData shape: {} obs × {} vars", n_obs, n_vars);
 
     if n_obs == 0 || n_vars == 0 {
-        return Err(RedicatError::EmptyData(
-            format!("Empty AnnData: {} obs × {} vars", n_obs, n_vars)
-        ));
+        return Err(RedicatError::EmptyData(format!(
+            "Empty AnnData: {} obs × {} vars",
+            n_obs, n_vars
+        )));
     }
 
     let obs_names = read_names(&adata.obs_names())?;
     let var_names = read_names(&adata.var_names())?;
-    
+
     // Validate that names match dimensions
     if obs_names.len() != n_obs {
         return Err(RedicatError::DimensionMismatch {
@@ -366,7 +419,7 @@ pub fn read_anndata_h5ad(path: &str) -> Result<AnnDataContainer> {
             actual: format!("obs_names length = {}", obs_names.len()),
         });
     }
-    
+
     if var_names.len() != n_vars {
         return Err(RedicatError::DimensionMismatch {
             expected: format!("var_names length = {}", n_vars),
@@ -379,8 +432,11 @@ pub fn read_anndata_h5ad(path: &str) -> Result<AnnDataContainer> {
     let x = read_x_matrix(&adata)?;
     let layers = read_layers_as_u32(&adata)?;
 
-    info!("Successfully loaded AnnData with {} layers: {:?}", 
-          layers.len(), layers.keys().collect::<Vec<_>>());
+    info!(
+        "Successfully loaded AnnData with {} layers: {:?}",
+        layers.len(),
+        layers.keys().collect::<Vec<_>>()
+    );
 
     let mut container = AnnDataContainer {
         obs,
@@ -395,7 +451,7 @@ pub fn read_anndata_h5ad(path: &str) -> Result<AnnDataContainer> {
 
     // Fix any dimension mismatches
     container.fix_dataframe_dimensions()?;
-    
+
     // Validate the fixed data
     container.validate_dimensions()?;
 
@@ -408,44 +464,82 @@ fn read_names(index: &DataFrameIndex) -> Result<Vec<String>> {
     Ok(index.clone().into_vec())
 }
 
-fn read_obs_dataframe(adata: &AnnData<H5>, obs_names: &[String], n_obs: usize) -> Result<DataFrame> {
+fn read_obs_dataframe(
+    adata: &AnnData<H5>,
+    obs_names: &[String],
+    n_obs: usize,
+) -> Result<DataFrame> {
     match adata.read_obs() {
         Ok(obs_df) => {
-            debug!("Read obs DataFrame: {} rows, {} columns", obs_df.height(), obs_df.width());
+            debug!(
+                "Read obs DataFrame: {} rows, {} columns",
+                obs_df.height(),
+                obs_df.width()
+            );
             if obs_df.height() == n_obs {
                 Ok(obs_df)
             } else {
-                warn!("obs DataFrame height ({}) doesn't match n_obs ({}), creating from names", 
-                      obs_df.height(), n_obs);
-                DataFrame::new(vec![Series::new("obs_names".into(), obs_names.to_vec()).into()])
-                    .map_err(|e| RedicatError::DataProcessing(format!("Failed to create obs DataFrame: {}", e)))
+                warn!(
+                    "obs DataFrame height ({}) doesn't match n_obs ({}), creating from names",
+                    obs_df.height(),
+                    n_obs
+                );
+                DataFrame::new(vec![
+                    Series::new("obs_names".into(), obs_names.to_vec()).into()
+                ])
+                .map_err(|e| {
+                    RedicatError::DataProcessing(format!("Failed to create obs DataFrame: {}", e))
+                })
             }
-        },
+        }
         Err(e) => {
             warn!("Failed to read obs DataFrame: {:?}, creating from names", e);
-            DataFrame::new(vec![Series::new("obs_names".into(), obs_names.to_vec()).into()])
-                .map_err(|e| RedicatError::DataProcessing(format!("Failed to create obs DataFrame: {}", e)))
+            DataFrame::new(vec![
+                Series::new("obs_names".into(), obs_names.to_vec()).into()
+            ])
+            .map_err(|e| {
+                RedicatError::DataProcessing(format!("Failed to create obs DataFrame: {}", e))
+            })
         }
     }
 }
 
-fn read_var_dataframe(adata: &AnnData<H5>, var_names: &[String], n_vars: usize) -> Result<DataFrame> {
+fn read_var_dataframe(
+    adata: &AnnData<H5>,
+    var_names: &[String],
+    n_vars: usize,
+) -> Result<DataFrame> {
     match adata.read_var() {
         Ok(var_df) => {
-            debug!("Read var DataFrame: {} rows, {} columns", var_df.height(), var_df.width());
+            debug!(
+                "Read var DataFrame: {} rows, {} columns",
+                var_df.height(),
+                var_df.width()
+            );
             if var_df.height() == n_vars {
                 Ok(var_df)
             } else {
-                warn!("var DataFrame height ({}) doesn't match n_vars ({}), creating from names", 
-                      var_df.height(), n_vars);
-                DataFrame::new(vec![Series::new("var_names".into(), var_names.to_vec()).into()])
-                    .map_err(|e| RedicatError::DataProcessing(format!("Failed to create var DataFrame: {}", e)))
+                warn!(
+                    "var DataFrame height ({}) doesn't match n_vars ({}), creating from names",
+                    var_df.height(),
+                    n_vars
+                );
+                DataFrame::new(vec![
+                    Series::new("var_names".into(), var_names.to_vec()).into()
+                ])
+                .map_err(|e| {
+                    RedicatError::DataProcessing(format!("Failed to create var DataFrame: {}", e))
+                })
             }
-        },
+        }
         Err(e) => {
             warn!("Failed to read var DataFrame: {:?}, creating from names", e);
-            DataFrame::new(vec![Series::new("var_names".into(), var_names.to_vec()).into()])
-                .map_err(|e| RedicatError::DataProcessing(format!("Failed to create var DataFrame: {}", e)))
+            DataFrame::new(vec![
+                Series::new("var_names".into(), var_names.to_vec()).into()
+            ])
+            .map_err(|e| {
+                RedicatError::DataProcessing(format!("Failed to create var DataFrame: {}", e))
+            })
         }
     }
 }
@@ -468,10 +562,14 @@ fn read_x_matrix(adata: &AnnData<H5>) -> Result<Option<CsrMatrix<f64>>> {
     match x_elem.data() {
         Ok(array_data) => match convert_array_to_csr_f64(array_data) {
             Ok(matrix) => {
-                info!("Read X matrix: {}×{} with {} non-zeros", 
-                      matrix.nrows(), matrix.ncols(), matrix.nnz());
+                info!(
+                    "Read X matrix: {}×{} with {} non-zeros",
+                    matrix.nrows(),
+                    matrix.ncols(),
+                    matrix.nnz()
+                );
                 Ok(Some(matrix))
-            },
+            }
             Err(e) => {
                 warn!("Failed to convert X matrix: {}", e);
                 Ok(None)
@@ -491,31 +589,36 @@ fn read_layers_as_u32(adata: &AnnData<H5>) -> Result<HashMap<String, CsrMatrix<u
 
     // Common layer names to try
     let common_layer_names = vec![
-        "A0", "T0", "G0", "C0", "A1", "T1", "G1", "C1",
-        "ref", "alt", "others", "coverage"
+        "A0", "T0", "G0", "C0", "A1", "T1", "G1", "C1", "ref", "alt", "others", "coverage",
     ];
 
     info!("Attempting to load common layers: {:?}", common_layer_names);
 
     for layer_name in common_layer_names {
         match layers_ref.get_item::<ArrayData>(layer_name) {
-            Ok(Some(array_data)) => {
-                match convert_array_to_csr_u32(array_data) {
-                    Ok(matrix) => {
-                        info!("  - Loaded layer '{}': {}×{} with {} non-zeros", 
-                              layer_name, matrix.nrows(), matrix.ncols(), matrix.nnz());
-                        layers.insert(layer_name.to_string(), matrix);
-                    },
-                    Err(e) => {
-                        warn!("  - Failed to convert layer '{}': {}", layer_name, e);
-                    }
+            Ok(Some(array_data)) => match convert_array_to_csr_u32(array_data) {
+                Ok(matrix) => {
+                    info!(
+                        "  - Loaded layer '{}': {}×{} with {} non-zeros",
+                        layer_name,
+                        matrix.nrows(),
+                        matrix.ncols(),
+                        matrix.nnz()
+                    );
+                    layers.insert(layer_name.to_string(), matrix);
+                }
+                Err(e) => {
+                    warn!("  - Failed to convert layer '{}': {}", layer_name, e);
                 }
             },
             Ok(None) => {
                 debug!("  - Layer '{}' not found (normal)", layer_name);
-            },
+            }
             Err(_) => {
-                debug!("  - Could not access layer '{}' (normal if it doesn't exist)", layer_name);
+                debug!(
+                    "  - Could not access layer '{}' (normal if it doesn't exist)",
+                    layer_name
+                );
             }
         }
     }
@@ -568,7 +671,9 @@ fn convert_array_to_csr_f64(array_data: ArrayData) -> Result<CsrMatrix<f64>> {
                     col_indices.to_vec(),
                     values_f64,
                 )
-                .map_err(|e| RedicatError::DataProcessing(format!("Failed to convert f32 to f64: {:?}", e)))
+                .map_err(|e| {
+                    RedicatError::DataProcessing(format!("Failed to convert f32 to f64: {:?}", e))
+                })
             }
             _ => Err(RedicatError::DataProcessing(
                 "Unsupported matrix type for f64 conversion".to_string(),
@@ -593,7 +698,9 @@ fn convert_array_to_csr_u32(array_data: ArrayData) -> Result<CsrMatrix<u32>> {
                     col_indices.to_vec(),
                     values_u32,
                 )
-                .map_err(|e| RedicatError::DataProcessing(format!("Failed to convert f32 to u32: {:?}", e)))
+                .map_err(|e| {
+                    RedicatError::DataProcessing(format!("Failed to convert f32 to u32: {:?}", e))
+                })
             }
             DynCsrMatrix::U16(matrix) => {
                 let (row_offsets, col_indices, values) = matrix.csr_data();
@@ -605,7 +712,9 @@ fn convert_array_to_csr_u32(array_data: ArrayData) -> Result<CsrMatrix<u32>> {
                     col_indices.to_vec(),
                     values_u32,
                 )
-                .map_err(|e| RedicatError::DataProcessing(format!("Failed to convert u16 to u32: {:?}", e)))
+                .map_err(|e| {
+                    RedicatError::DataProcessing(format!("Failed to convert u16 to u32: {:?}", e))
+                })
             }
             _ => Err(RedicatError::DataProcessing(
                 "Unsupported matrix type for u32 conversion".to_string(),
