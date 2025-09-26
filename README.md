@@ -21,9 +21,8 @@ If a metric is missing or performance is lacking, please file a bug/feature tick
 
 Please cite us:
 
-```
-Wei, T., Li, J., Lei, X., Lin, R., Wu, Q., Zhang, Z., Shuai, S., & Tian, R. (2025). Multimodal CRISPR screens uncover DDX39B as a global repressor of a-to-I RNA editing. Cell Reports, 44(7). https://doi.org/10.1016/j.celrep.2025.116009
-```
+> Wei, T., Li, J., Lei, X., Lin, R., Wu, Q., Zhang, Z., Shuai, S., & Tian, R. (2025). Multimodal CRISPR screens uncover DDX39B as a global repressor of a-to-I RNA editing. Cell Reports, 44(7). https://doi.org/10.1016/j.celrep.2025.116009
+
 
 
 
@@ -39,8 +38,11 @@ chmod 777 redicat
 # Filter BAM file
 redicat preprocess --barcodes barcodes.tsv.gz --inbam input.bam --outbam filtered.bam
 
-# Analyze candidate editing sites
-redicat bulk --edited input.bam -o positions.tsv.gz
+# Analyze candidate editing sites with stringent filtering (default)
+redicat bulk input.bam -o positions.tsv.gz
+
+# Analyze all positions (less stringent filtering)
+redicat bulk --all input.bam -o positions.tsv.gz
 
 # Convert BAM to single-cell base mismatch matrix
 redicat bam2mtx --bam input.bam --tsv positions.tsv.gz --barcodes barcodes.tsv.gz --output matrix.h5ad
@@ -85,9 +87,18 @@ cargo install --git https://github.com/aStudyingTurtle/redicat_rust.git
 The `bulk` tool walks over every position in the BAM/CRAM file and calculates the depth, as well as the number of each nucleotide at the given position. Additionally, it counts the numbers of Ins/Dels at each position.
 Some libs of the `bulk` tool are from [perbase](https://github.com/sstadick/perbase).
 
+By default, the tool applies stringent filtering to identify high-quality editing sites. Use the `--all` flag to report all positions with less stringent filtering. The output is automatically compressed using gzip compression.
+
 
 ```bash
-redicat bulk --edited ./test/test.bam
+# Analyze with stringent filtering (default)
+redicat bulk ./test/test.bam -o output.tsv.gz
+
+# Analyze all positions (less stringent filtering)
+redicat bulk --all ./test/test.bam -o output.tsv.gz
+
+# Analyze with custom editing threshold
+redicat bulk --editing-threshold 500 ./test/test.bam -o output.tsv.gz
 ```
 
 Usage:
@@ -99,30 +110,37 @@ USAGE:
     redicat bulk [FLAGS] [OPTIONS] <reads>
 
 FLAGS:
-    -Z, --bgzip                     
-            Optionally bgzip the output
     -h, --help                      
             Prints help information
-    -e, --edited                     
-            Use edited filtering logic. If true, applies more stringent filtering based on nucleotide counts.
+    -a, --all                     
+            Report all positions, not just edited ones. When set, applies less stringent filtering.
 
 
 OPTIONS:
     -B, --bcf-file <bcf-file>
             A BCF/VCF file containing positions of interest. If specified, only bases from the given positions will be reported on
+    -c, --chunksize <chunksize>                              
+            The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize. [default: 2500]
     -d, --min-depth <min-depth>                              
             The minimum valid depth to report on. If a position has a depth less than this it will not be reported. [default: 10]
-    -Q, --min-base-quality-score <min-base-quality-score>
+    -D, --max-depth <max-depth>
+            Set the max depth for a pileup. If a positions depth is within 1% of max-depth the `NEAR_MAX_DEPTH`
+            output field will be set to true and that position should be viewed as suspect. [default: 8000]
+    -et, --editing-threshold <editing-threshold>
+            Editing threshold for valid value calculation (pos.depth / editing_threshold). [default: 1000]
+    -n, --max-n-fraction <max-n-fraction>
+            The number of N at a position must be less than or equal to this fraction of the total depth to be reported. [default: 20]
+    -Q, --min-baseq <min-baseq>
             Minium base quality for a base to be counted toward [A, C, T, G]. If the base is less than the specified
             quality score it will instead be counted as an `N`.
-    -q, --min-mapq <min-mapq>                                
-            Minimum MAPQ for a read to count toward depth [default: 0]
-
     -o, --output <output>                                    
-            Output path, defaults to stdout
+            Output path (required, will automatically append .gz if not present)
 
     -t, --threads <threads>                                  
             The number of threads to use [default: 10]
+
+    -z, --zero-base
+            Output positions as 0-based instead of 1-based
 
 
 ARGS:

@@ -12,7 +12,7 @@
 //! - Parallel processing using the par_granges framework
 //! - Configurable filtering based on base quality and depth thresholds
 //! - Support for both 0-based and 1-based coordinate output
-//! - Optional bgzip compression for output
+//! - Automatic gzip compression for output
 //! - Support for BED and BCF/VCF region restrictions
 use anyhow::Result;
 use log::*;
@@ -33,35 +33,17 @@ pub struct Bulk {
     /// Input indexed BAM/CRAM to analyze.
     reads: PathBuf,
 
-    /// Output path, defaults to stdout.
+    /// Output path (required, will automatically append .gz if not present).
     #[structopt(long, short = "o")]
-    output: Option<PathBuf>,
-
-    /// Optionally bgzip the output.
-    #[structopt(long, short = "Z")]
-    bgzip: bool,
+    output: PathBuf,
 
     /// The number of threads to use.
     #[structopt(long, short = "t", default_value = "10")]
     threads: usize,
 
-    /// The number of threads to use for compressing output (specified by --bgzip)
-    #[structopt(long, short = "T", default_value = "2")]
-    compression_threads: usize,
-
-    /// The level to use for compressing output (specified by --bgzip)
-    #[structopt(long, short = "L", default_value = "2")]
-    compression_level: u32,
-
     /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
     #[structopt(long, short = "c", default_value=par_granges::CHUNKSIZE_STR.as_str())]
     chunksize: u32,
-
-    // NB: If there are large regions of low coverage, bumping this up may be helpful.
-    /// The fraction of a gigabyte to allocate per thread for message passing, can be greater than 1.0.
-    #[structopt(long, short = "C", default_value = "0.5")]
-    channel_size_modifier: f64,
-
 
     /// Minium base quality for a base to be counted toward [A, C, T, G]. If the base is less than the specified
     /// quality score it will instead be counted as an `N`. If nothing is set for this to 30.
@@ -82,9 +64,13 @@ pub struct Bulk {
     /// The number of N at a position must be less than or equal to this fraction of the total depth to be reported.
     #[structopt(long, short = "n", default_value = "20")]
     max_n_fraction: u32,
-    /// Use edited filtering logic. If true, applies more stringent filtering based on nucleotide counts.
-    #[structopt(long, short = "e")]
-    edited: bool,
+    /// Report all positions, not just edited ones. When set, applies less stringent filtering.
+    #[structopt(long, short = "a")]
+    all: bool,
+
+    /// Editing threshold for valid value calculation (pos.depth / editing_threshold).
+    #[structopt(long = "editing-threshold", short = "et", default_value = "1000")]
+    editing_threshold: u32,
 }
 
 impl Bulk {
@@ -92,12 +78,22 @@ impl Bulk {
         info!("Running redicat-bulk on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
+        // Ensure output file has .gz extension
+        let output_path = if self.output.extension().and_then(|ext| ext.to_str()) == Some("gz") {
+            self.output.clone()
+        } else {
+            let mut new_path = self.output.clone();
+            let new_name = format!("{}.gz", self.output.file_name().unwrap().to_string_lossy());
+            new_path.set_file_name(new_name);
+            new_path
+        };
+
         let mut writer = utils::get_writer(
-            &self.output,
-            self.bgzip,
+            &Some(output_path),
+            true, // Always use compression
             true,
-            self.compression_threads,
-            self.compression_level,
+            1,    // Single-threaded compression
+            6,    // Default compression level
         )?;
 
         let base_processor = BaseProcessor::new(
@@ -107,7 +103,8 @@ impl Bulk {
             self.min_depth,
             self.max_n_fraction,
             self.min_baseq,
-            self.edited,
+            !self.all, // Use edited filtering logic based on command line parameter (inverted: --all means less stringent)
+            self.editing_threshold,
         );
 
         let par_granges_runner = par_granges::ParGranges::new(
@@ -118,7 +115,7 @@ impl Bulk {
             false,
             Some(cpus),
             Some(self.chunksize),
-            Some(self.channel_size_modifier),
+            Some(0.5), // Fixed channel_size_modifier
             base_processor,
         );
 
@@ -149,6 +146,8 @@ struct BaseProcessor {
     min_baseq: Option<u8>,
     /// whether to use edited filtering logic
     edited: bool,
+    /// editing threshold for valid value calculation
+    editing_threshold: u32,
 }
 
 impl BaseProcessor {
@@ -161,6 +160,7 @@ impl BaseProcessor {
         max_n_fraction: u32,
         min_baseq: Option<u8>,
         edited: bool,
+        editing_threshold: u32,
     ) -> Self {
         let min_baseq = min_baseq.or(Some(30u8));
         Self {
@@ -171,6 +171,7 @@ impl BaseProcessor {
             max_n_fraction,
             min_baseq,
             edited,
+            editing_threshold,
         }
     }
 }
@@ -220,7 +221,7 @@ impl RegionProcessor for BaseProcessor {
                 pos.pos += self.coord_base;
 
                 let should_include = if self.edited {
-                    let valid_value = max(pos.depth / 1000_u32, 2);
+                    let valid_value = max(pos.depth / self.editing_threshold, 2);
                     let mut count = 0;
                     if pos.a > valid_value {
                         count += 1;
@@ -278,6 +279,7 @@ mod tests {
             20,       // max_n_fraction
             Some(30), // min_baseq
             false,    // edited
+            1000,     // editing_threshold
         );
 
         // Process the region chr22:11252003-11252024 (0-based coordinates would be 11252002-11252024)

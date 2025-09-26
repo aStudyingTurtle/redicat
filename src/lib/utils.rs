@@ -10,7 +10,7 @@
 //! - BGZF compression handling
 use anyhow::{Error, Result};
 use grep_cli::stdout;
-use gzp::{deflate::Bgzf, BgzfSyncReader, Compression, ZBuilder};
+use gzp::{deflate::Gzip, BgzfSyncReader, Compression, ZBuilder};
 use lazy_static::lazy_static;
 use log::{error, warn};
 use std::{
@@ -146,7 +146,7 @@ pub fn get_reader<P: AsRef<Path>>(
 /// - If unable to parse input path
 pub fn get_writer<P: AsRef<Path>>(
     path: &Option<P>,
-    bgzipped: bool,
+    gzipped: bool,
     write_headers: bool,
     threads: usize,
     compression_level: u32,
@@ -154,9 +154,9 @@ pub fn get_writer<P: AsRef<Path>>(
     let raw_writer: Box<dyn Write> = match &path {
         Some(path) if path.as_ref().to_str().unwrap() != "-" => {
             let writer = BufWriter::new(File::create(path)?);
-            if bgzipped {
+            if gzipped {
                 Box::new(
-                    ZBuilder::<Bgzf, _>::new()
+                    ZBuilder::<Gzip, _>::new()
                         .num_threads(threads)
                         .compression_level(Compression::new(compression_level))
                         .from_writer(writer),
@@ -167,9 +167,9 @@ pub fn get_writer<P: AsRef<Path>>(
         }
         _ => {
             let writer = stdout(ColorChoice::Never);
-            if bgzipped {
+            if gzipped {
                 Box::new(
-                    ZBuilder::<Bgzf, _>::new()
+                    ZBuilder::<Gzip, _>::new()
                         .num_threads(threads)
                         .compression_level(Compression::new(compression_level))
                         .from_writer(writer),
