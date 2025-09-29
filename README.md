@@ -94,7 +94,8 @@ Converts barcoded BAMs into sparse AnnData matrices (per base, per barcode, stra
 Highlights:
 - TSV positions are filtered to canonical contigs unless `--allcontigs` is specified.
 - Depth/N/editing thresholds drop low-quality loci before matrix assembly, matching the first-pass `bulk` defaults.
-- Reader pools and chunk-aware parallelism keep pileups cache-friendly while streaming chunk results to bound memory.
+- `--two-pass` scouts sites with `bulk --max-depth 8000`, trimming runaway pileups before the heavy second pass.
+- Reader pools and chunk-aware parallelism keep pileups cache-friendly while chunk staging bounds memory.
 - Output matrices respect the density hint supplied via `--matrix-density`.
 
 Option reference:
@@ -112,7 +113,9 @@ Option reference:
 | `-d`  | `--min-depth`         | Minimum non-`N` coverage to keep a site.                       | `10`     |
 | `-n`  | `--max-n-fraction`    | Maximum tolerated ambiguous fraction (depth / value).          | `20`     |
 | `-et` | `--editing-threshold` | Ensures at least two bases exceed `depth / editing-threshold`. | `1000`   |
-| `-s`  | `--stranded`          | Treat UMIs as strand-aware.                                    | `false`  |
+| `-D`  | `--max-depth`         | Hard cap on reads inspected per site.                          | `20000`  |
+| `-s`  | `--skip-max-depth`    | Skip sites once coverage exceeds `--max-depth` (alias `-sd`).  | `false`  |
+| `-S`  | `--stranded`          | Treat UMIs as strand-aware.                                    | `false`  |
 | —     | `--umi-tag`           | BAM tag containing UMI sequence.                               | `UB`     |
 | —     | `--cb-tag`            | BAM tag containing cell barcode.                               | `CB`     |
 | `-r`  | `--reference`         | Reference FASTA (required for CRAM).                           | optional |
@@ -132,7 +135,7 @@ Important options:
 - **Reader pooling:** Each worker thread checks out an `IndexedReader` from a pool, avoiding reopen/seek penalties when iterating across genomic tiles.
 - **Triplet batching:** Sparse matrices are assembled from thread-local batches of `(row, col, value)` triplets, eliminating cross-thread contention.
 - **Adaptive chunking:** CLI `--chunksize` values govern the parallel granularity for both `ParGranges` (bulk) and `bam2mtx` chunk processors and double as the AnnData write batch size.
-- **Streaming aggregation:** `bam2mtx` reduces chunk results incrementally, keeping memory proportional to the number of confident loci rather than the full site list.
+- **Chunk-level fetch & depth guards:** `bam2mtx` batches contiguous sites per contig, enforces configurable max-depth caps, and drops oversaturated loci when requested to keep runtime predictable.
 
 ## Testing & Data
 ```bash

@@ -87,9 +87,18 @@ impl Bam2MtxProcessor {
                 continue;
             }
 
+            let mut processed = 0u32;
+            let mut truncated = false;
+
             for alignment in pileup.alignments() {
                 if !self.should_process_alignment(&alignment) {
                     continue;
+                }
+
+                processed = processed.saturating_add(1);
+                if processed > self.config.max_depth {
+                    truncated = true;
+                    break;
                 }
 
                 let record = alignment.record();
@@ -123,6 +132,14 @@ impl Bam2MtxProcessor {
                         })
                         .or_insert(encoded);
                 }
+            }
+
+            if truncated && self.config.skip_max_depth {
+                return Ok(PositionData {
+                    chrom,
+                    pos: (pos + 1) as u64,
+                    counts: HashMap::new(),
+                });
             }
         }
 

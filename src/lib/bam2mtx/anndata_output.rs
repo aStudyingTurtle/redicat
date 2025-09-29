@@ -37,9 +37,9 @@ impl Default for AnnDataConfig {
             stranded: true,
             compression: Some("gzip".to_string()),
             threads: num_cpus::get(),
-            chunk_size: 15000,    // Medium size balancing memory and performance
-            matrix_density: 0.01, // Typical sparsity for single-cell data
-            batch_size: 1000,     // Moderate batch size
+            chunk_size: 15000,     // Medium size balancing memory and performance
+            matrix_density: 0.005, // Typical sparsity for single-cell data
+            batch_size: 2500,      // Moderate batch size
         }
     }
 }

@@ -15,6 +15,7 @@
 //! - Configurable chunk sizes and matrix density estimation
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -86,8 +87,16 @@ pub struct Bam2MtxArgs {
     pub editing_threshold: u32,
 
     /// Whether data is stranded (default: unstranded)
-    #[structopt(long, short = "s")]
+    #[structopt(long, short = "S")]
     pub stranded: bool,
+
+    /// Maximum pileup depth to examine per site (reads beyond this limit are ignored)
+    #[structopt(long = "max-depth", default_value = "20000", short = "D")]
+    pub max_depth: u32,
+
+    /// Skip sites whose observed depth exceeds the configured max-depth (alias: -sd)
+    #[structopt(long = "skip-max-depth", short = "s", visible_alias = "sd")]
+    pub skip_max_depth: bool,
 
     /// UMI tag name
     #[structopt(long, default_value = "UB")]
@@ -131,7 +140,6 @@ pub struct PositionChunk {
 /// Read TSV file with streaming parser for better memory efficiency
 fn read_tsv_file<P: AsRef<Path>>(tsv_path: P) -> Result<Vec<GenomicPosition>> {
     use flate2::read::GzDecoder;
-    use std::fs::File;
     use std::io::{BufRead, BufReader};
 
     let path = tsv_path.as_ref();
@@ -269,6 +277,10 @@ impl OptimizedChunkProcessor {
     }
 
     pub fn process_chunk(&self, chunk: &PositionChunk) -> Result<Vec<PositionData>> {
+        if chunk.positions.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let mut reader = {
             let mut pool = self.reader_pool.lock();
             pool.pop()
@@ -277,63 +289,71 @@ impl OptimizedChunkProcessor {
             rust_htslib::bam::IndexedReader::from_path(&self.bam_path)
                 .unwrap_or_else(|e| panic!("Failed to open BAM {}: {}", self.bam_path.display(), e))
         });
+        debug_assert!(chunk
+            .positions
+            .iter()
+            .all(|p| p.chrom == chunk.positions[0].chrom));
+
+        let chrom = &chunk.positions[0].chrom;
+        let tid = match self.tid_lookup.get(chrom) {
+            Some(tid) => *tid,
+            None => {
+                let mut pool = self.reader_pool.lock();
+                pool.push(reader);
+                return Ok(Vec::new());
+            }
+        };
+
+        let fetch_start = chunk
+            .positions
+            .first()
+            .map(|p| p.pos.saturating_sub(1) as u32)
+            .unwrap_or(0);
+        let fetch_end = chunk
+            .positions
+            .last()
+            .map(|p| p.pos as u32)
+            .unwrap_or(fetch_start);
+
+        reader.fetch((tid, fetch_start, fetch_end))?;
+
+        let target_positions: Vec<u32> = chunk
+            .positions
+            .iter()
+            .map(|p| p.pos.saturating_sub(1) as u32)
+            .collect();
+
         let mut chunk_results = Vec::with_capacity(chunk.positions.len());
+        let mut position_index = 0usize;
 
         let mut counts: FxHashMap<String, StrandBaseCounts> = FxHashMap::default();
         counts.reserve(self.count_capacity_hint);
         let mut umi_consensus: FxHashMap<(String, String), u8> = FxHashMap::default();
         umi_consensus.reserve(self.umi_capacity_hint);
 
-        for pos_data in &chunk.positions {
-            debug_assert!(counts.is_empty());
-            debug_assert!(umi_consensus.is_empty());
-
-            let chrom = pos_data.chrom.as_str();
-            let pos = pos_data.pos;
-
-            let tid = match self.tid_lookup.get(chrom) {
-                Some(tid) => *tid,
-                None => continue,
-            };
-
-            if let Some(position_data) = self.process_single_position_optimized(
-                &mut reader,
-                tid,
-                pos - 1,
-                chrom,
-                &mut counts,
-                &mut umi_consensus,
-            )? {
-                chunk_results.push(position_data);
-            }
-        }
-
-        {
-            let mut pool = self.reader_pool.lock();
-            pool.push(reader);
-        }
-
-        Ok(chunk_results)
-    }
-
-    fn process_single_position_optimized(
-        &self,
-        reader: &mut rust_htslib::bam::IndexedReader,
-        tid: u32,
-        pos: u64,
-        chrom: &str,
-        counts: &mut FxHashMap<String, StrandBaseCounts>,
-        umi_consensus: &mut FxHashMap<(String, String), u8>,
-    ) -> Result<Option<PositionData>> {
-        reader.fetch((tid, pos as u32, pos as u32 + 1))?;
-
-        let mut n_count: u32 = 0;
-
         for pileup in reader.pileup() {
             let pileup = pileup?;
-            if pileup.pos() != pos as u32 {
+            let pile_pos = pileup.pos();
+
+            while position_index < target_positions.len()
+                && target_positions[position_index] < pile_pos
+            {
+                position_index += 1;
+            }
+
+            if position_index >= target_positions.len() {
+                break;
+            }
+
+            if target_positions[position_index] != pile_pos {
                 continue;
             }
+
+            counts.clear();
+            umi_consensus.clear();
+            let mut n_count: u32 = 0;
+            let mut processed: u32 = 0;
+            let mut truncated = false;
 
             for alignment in pileup.alignments() {
                 let record = alignment.record();
@@ -346,6 +366,12 @@ impl OptimizedChunkProcessor {
                     Some(q) => q,
                     None => continue,
                 };
+
+                processed = processed.saturating_add(1);
+                if processed > self.config.max_depth {
+                    truncated = true;
+                    break;
+                }
 
                 let base_qual = record.qual().get(qpos).copied().unwrap_or(0);
                 if base_qual < self.config.min_base_quality {
@@ -369,9 +395,8 @@ impl OptimizedChunkProcessor {
                     continue;
                 }
 
-                let is_reverse = record.is_reverse();
-
-                if let Some(encoded) = encode_call(self.config.stranded, base, is_reverse) {
+                if let Some(encoded) = encode_call(self.config.stranded, base, record.is_reverse())
+                {
                     umi_consensus
                         .entry((cell_barcode, umi))
                         .and_modify(|existing| {
@@ -382,90 +407,104 @@ impl OptimizedChunkProcessor {
                         .or_insert(encoded);
                 }
             }
-        }
 
-        // Process UMI consensus with optimized aggregation
-        for ((cell_barcode, _umi), encoded) in umi_consensus.drain() {
-            if encoded == UMI_CONFLICT_CODE {
+            let current_index = position_index;
+            position_index += 1;
+
+            if truncated && self.config.skip_max_depth {
                 continue;
             }
 
-            let counts_entry = counts
-                .entry(cell_barcode)
-                .or_insert_with(StrandBaseCounts::default);
+            for ((cell_barcode, _umi), encoded) in umi_consensus.drain() {
+                if encoded == UMI_CONFLICT_CODE {
+                    continue;
+                }
 
-            apply_encoded_call(self.config.stranded, encoded, counts_entry);
+                let counts_entry = counts
+                    .entry(cell_barcode)
+                    .or_insert_with(StrandBaseCounts::default);
+
+                apply_encoded_call(self.config.stranded, encoded, counts_entry);
+            }
+
+            if counts.is_empty() {
+                continue;
+            }
+
+            let mut position_counts: HashMap<String, StrandBaseCounts> =
+                HashMap::with_capacity(counts.len());
+            position_counts.extend(counts.drain());
+
+            let mut a_total = 0u32;
+            let mut t_total = 0u32;
+            let mut g_total = 0u32;
+            let mut c_total = 0u32;
+
+            for strand_counts in position_counts.values() {
+                a_total = a_total
+                    .saturating_add(strand_counts.forward.a)
+                    .saturating_add(strand_counts.reverse.a);
+                t_total = t_total
+                    .saturating_add(strand_counts.forward.t)
+                    .saturating_add(strand_counts.reverse.t);
+                g_total = g_total
+                    .saturating_add(strand_counts.forward.g)
+                    .saturating_add(strand_counts.reverse.g);
+                c_total = c_total
+                    .saturating_add(strand_counts.forward.c)
+                    .saturating_add(strand_counts.reverse.c);
+            }
+
+            let effective_depth = a_total + t_total + g_total + c_total;
+            if effective_depth < self.config.min_depth {
+                continue;
+            }
+
+            let total_depth = effective_depth + n_count;
+            let n_limit = if self.config.max_n_fraction == 0 {
+                u32::MAX
+            } else {
+                std::cmp::max(total_depth / self.config.max_n_fraction, 2)
+            };
+
+            if n_count > n_limit {
+                continue;
+            }
+
+            let editing_denom = std::cmp::max(self.config.editing_threshold, 1);
+            let valid_value = std::cmp::max(total_depth / editing_denom, 2);
+            let mut support = 0;
+            if a_total > valid_value {
+                support += 1;
+            }
+            if t_total > valid_value {
+                support += 1;
+            }
+            if g_total > valid_value {
+                support += 1;
+            }
+            if c_total > valid_value {
+                support += 1;
+            }
+
+            if support < 2 {
+                continue;
+            }
+
+            let position_meta = &chunk.positions[current_index];
+            chunk_results.push(PositionData {
+                chrom: position_meta.chrom.clone(),
+                pos: position_meta.pos,
+                counts: position_counts,
+            });
         }
 
-        if counts.is_empty() {
-            return Ok(None);
+        {
+            let mut pool = self.reader_pool.lock();
+            pool.push(reader);
         }
 
-        let mut position_counts: HashMap<String, StrandBaseCounts> =
-            HashMap::with_capacity(counts.len());
-        position_counts.extend(counts.drain());
-
-        let mut a_total = 0u32;
-        let mut t_total = 0u32;
-        let mut g_total = 0u32;
-        let mut c_total = 0u32;
-
-        for strand_counts in position_counts.values() {
-            a_total = a_total
-                .saturating_add(strand_counts.forward.a)
-                .saturating_add(strand_counts.reverse.a);
-            t_total = t_total
-                .saturating_add(strand_counts.forward.t)
-                .saturating_add(strand_counts.reverse.t);
-            g_total = g_total
-                .saturating_add(strand_counts.forward.g)
-                .saturating_add(strand_counts.reverse.g);
-            c_total = c_total
-                .saturating_add(strand_counts.forward.c)
-                .saturating_add(strand_counts.reverse.c);
-        }
-
-        let effective_depth = a_total + t_total + g_total + c_total;
-        if effective_depth < self.config.min_depth {
-            return Ok(None);
-        }
-
-        let total_depth = effective_depth + n_count;
-        let n_limit = if self.config.max_n_fraction == 0 {
-            u32::MAX
-        } else {
-            std::cmp::max(total_depth / self.config.max_n_fraction, 2)
-        };
-
-        if n_count > n_limit {
-            return Ok(None);
-        }
-
-        let editing_denom = std::cmp::max(self.config.editing_threshold, 1);
-        let valid_value = std::cmp::max(total_depth / editing_denom, 2);
-        let mut support = 0;
-        if a_total > valid_value {
-            support += 1;
-        }
-        if t_total > valid_value {
-            support += 1;
-        }
-        if g_total > valid_value {
-            support += 1;
-        }
-        if c_total > valid_value {
-            support += 1;
-        }
-
-        if support < 2 {
-            return Ok(None);
-        }
-
-        Ok(Some(PositionData {
-            chrom: chrom.to_string(),
-            pos: pos + 1,
-            counts: position_counts,
-        }))
+        Ok(chunk_results)
     }
 
     fn get_cell_barcode(&self, record: &rust_htslib::bam::record::Record) -> Result<String> {
@@ -589,6 +628,8 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
         max_n_fraction: args.max_n_fraction,
         editing_threshold: args.editing_threshold,
         stranded: args.stranded,
+        max_depth: args.max_depth,
+        skip_max_depth: args.skip_max_depth,
         umi_tag: args.umi_tag.clone(),
         cell_barcode_tag: args.cb_tag.clone(),
     };
@@ -679,6 +720,8 @@ fn run_bulk_first_pass(args: &Bam2MtxArgs, target: &Path) -> Result<()> {
         args.min_depth.to_string(),
         "--max-n-fraction".to_string(),
         args.max_n_fraction.to_string(),
+        "-D".to_string(),
+        "8000".to_string(),
         "--editing-threshold".to_string(),
         args.editing_threshold.to_string(),
     ];
@@ -724,5 +767,7 @@ mod tests {
         assert_eq!(args.max_n_fraction, 20);
         assert_eq!(args.editing_threshold, 1000);
         assert!(!args.two_pass);
+        assert_eq!(args.max_depth, 20000);
+        assert!(!args.skip_max_depth);
     }
 }

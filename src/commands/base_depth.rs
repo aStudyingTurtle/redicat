@@ -260,7 +260,8 @@ impl RegionProcessor for BaseProcessor {
             self.max_depth,
         ));
 
-        let mut result = Vec::new();
+        let estimated = (stop.saturating_sub(start) / 10).max(16) as usize;
+        let mut result = Vec::with_capacity(estimated);
         for p in pileup {
             let pileup = p.expect("Extracted a pileup");
             // Verify that we are within the bounds of the chunk we are iterating on

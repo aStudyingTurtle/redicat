@@ -20,8 +20,6 @@ impl BarcodeProcessor {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let file = File::open(path)?;
-
-        // Use a large buffer for better performance
         let reader: Box<dyn BufRead> = if path
             .extension()
             .and_then(|s| s.to_str())
@@ -33,28 +31,7 @@ impl BarcodeProcessor {
             Box::new(BufReader::with_capacity(256 * 1024, file))
         };
 
-        let mut valid_barcodes = FxHashSet::default();
-        let mut line = String::with_capacity(64); // Optimize for barcode length
-
-        for result in reader.lines() {
-            line.clear();
-            match result {
-                Ok(line_content) => {
-                    let barcode = line_content.trim();
-                    if !barcode.is_empty() {
-                        // Handle barcodes that might have suffixes like "-1"
-                        let clean_barcode = barcode.split('-').next().unwrap_or(barcode);
-                        valid_barcodes.insert(clean_barcode.to_string());
-                    }
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        valid_barcodes.shrink_to_fit();
-        Ok(BarcodeProcessor {
-            valid_barcodes: Arc::new(valid_barcodes),
-        })
+        Self::from_reader(reader)
     }
 
     /// Check if a barcode is valid
@@ -79,5 +56,29 @@ impl BarcodeProcessor {
         let mut barcodes: Vec<_> = self.valid_barcodes.iter().cloned().collect();
         barcodes.sort();
         barcodes
+    }
+
+    fn from_reader(reader: Box<dyn BufRead>) -> Result<Self> {
+        let mut valid_barcodes = FxHashSet::default();
+        let mut line = String::with_capacity(64);
+
+        for result in reader.lines() {
+            line.clear();
+            match result {
+                Ok(line_content) => {
+                    let barcode = line_content.trim();
+                    if !barcode.is_empty() {
+                        let clean_barcode = barcode.split('-').next().unwrap_or(barcode);
+                        valid_barcodes.insert(clean_barcode.to_string());
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        valid_barcodes.shrink_to_fit();
+        Ok(BarcodeProcessor {
+            valid_barcodes: Arc::new(valid_barcodes),
+        })
     }
 }

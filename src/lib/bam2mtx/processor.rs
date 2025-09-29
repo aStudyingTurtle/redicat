@@ -108,6 +108,10 @@ pub struct BamProcessorConfig {
     pub editing_threshold: u32,
     /// Whether the data is stranded (true) or unstranded (false)
     pub stranded: bool,
+    /// Maximum pileup depth to examine per genomic position
+    pub max_depth: u32,
+    /// Skip sites whose observed depth exceeds the configured max depth
+    pub skip_max_depth: bool,
     /// Tag name for UMI (Unique Molecular Identifier)
     pub umi_tag: String,
     /// Tag name for cell barcode
@@ -123,6 +127,8 @@ impl Default for BamProcessorConfig {
             max_n_fraction: 20,
             editing_threshold: 1000,
             stranded: true,
+            max_depth: 20000,
+            skip_max_depth: false,
             umi_tag: "UB".to_string(),
             cell_barcode_tag: "CB".to_string(),
         }
@@ -168,15 +174,25 @@ impl BamProcessor {
         let mut umi_consensus: FxHashMap<(String, String), u8> = FxHashMap::default();
 
         // Process pileup
+        let mut truncated_due_to_depth = false;
+
         for pileup in pileups {
             let pileup = pileup?;
             if pileup.pos() != start_pos {
                 continue;
             }
 
+            let mut processed = 0u32;
+
             for read in pileup.alignments() {
                 if !self.should_process_read(&read) {
                     continue;
+                }
+
+                processed = processed.saturating_add(1);
+                if processed > self.config.max_depth {
+                    truncated_due_to_depth = true;
+                    break;
                 }
 
                 let record = read.record();
@@ -203,6 +219,14 @@ impl BamProcessor {
                         })
                         .or_insert(encoded);
                 }
+            }
+
+            if truncated_due_to_depth && self.config.skip_max_depth {
+                return Ok(PositionData {
+                    chrom: chrom.to_string(),
+                    pos,
+                    counts: HashMap::new(),
+                });
             }
         }
 
