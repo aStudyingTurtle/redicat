@@ -113,7 +113,7 @@ Option reference:
 | `-d`  | `--min-depth`         | Minimum non-`N` coverage to keep a site.                       | `10`     |
 | `-n`  | `--max-n-fraction`    | Maximum tolerated ambiguous fraction (depth / value).          | `20`     |
 | `-et` | `--editing-threshold` | Ensures at least two bases exceed `depth / editing-threshold`. | `1000`   |
-| `-D`  | `--max-depth`         | Hard cap on reads inspected per site.                          | `20000`  |
+| `-D`  | `--max-depth`         | Hard cap on reads inspected per site.                          | `50000`  |
 | `-s`  | `--skip-max-depth`    | Skip sites once coverage exceeds `--max-depth` (alias `-sd`).  | `false`  |
 | `-S`  | `--stranded`          | Treat UMIs as strand-aware.                                    | `false`  |
 | —     | `--umi-tag`           | BAM tag containing UMI sequence.                               | `UB`     |
