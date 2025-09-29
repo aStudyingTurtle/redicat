@@ -329,7 +329,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                             log::error!("Invalid target length for TID {}", tid);
                             return;
                         }
-                        info!("Processing {}:0-{}", tid_name, tid_end);
+                        // info!("Processing {}:0-{}", tid_name, tid_end);
 
                         for chunk_start in (0..tid_end).step_by(serial_step_size as usize) {
                             let chunk_end =
