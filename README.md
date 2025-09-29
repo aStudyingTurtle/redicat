@@ -68,6 +68,7 @@ Add `--allcontigs` to any command that should consider every contig in the BAM h
 ## Subcommands
 ### `bulk`
 Calculates per-base depth and nucleotide counts across a BAM/CRAM. Filtering options allow you to tune MAPQ, base quality, minimum depth, and an editing-specific heuristic. Results stream to a bgzip-compressed TSV.
+Some libraries of `bulk` were taken form the [`perbase`](https://github.com/sstadick/perbase) project.
 
 Option reference:
 
