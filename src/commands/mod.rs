@@ -1,6 +1,7 @@
 pub mod bam2mtx;
-pub mod base_depth;
+pub mod bulk;
 pub mod call;
+pub mod common;
 
 /// Canonical human contigs processed by default for BAM-driven analytics.
 ///
@@ -22,5 +23,7 @@ pub fn is_standard_contig(name: &str) -> bool {
         .any(|contig| contig.eq_ignore_ascii_case(name))
 }
 
-// Re-export Bulk struct with new name
-pub use base_depth::Bulk;
+// Re-export CLI surface for subcommands
+pub use bam2mtx::{run_bam2mtx, Bam2MtxArgs};
+pub use bulk::{run_bulk, BulkArgs};
+pub use call::{run_call, CallArgs};

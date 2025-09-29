@@ -50,19 +50,19 @@ struct Args {
 #[derive(StructOpt)]
 enum Subcommand {
     /// Calculate the depth at each base, per-nucleotide
-    Bulk(commands::Bulk),
+    Bulk(commands::BulkArgs),
     /// Convert BAM files to single-cell matrices
-    Bam2mtx(commands::bam2mtx::Bam2MtxArgs),
+    Bam2mtx(commands::Bam2MtxArgs),
     /// RNA editing detection and analysis pipeline
-    Call(commands::call::CallArgs),
+    Call(commands::CallArgs),
 }
 
 impl Subcommand {
     fn run(self) -> Result<()> {
         match self {
-            Subcommand::Bulk(x) => x.run()?,
-            Subcommand::Bam2mtx(args) => commands::bam2mtx::run_bam2mtx(args)?,
-            Subcommand::Call(args) => commands::call::run_call(args)?,
+            Subcommand::Bulk(args) => commands::run_bulk(args)?,
+            Subcommand::Bam2mtx(args) => commands::run_bam2mtx(args)?,
+            Subcommand::Call(args) => commands::run_call(args)?,
         }
         Ok(())
     }

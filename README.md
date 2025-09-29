@@ -13,6 +13,7 @@ If REDICAT supports your research, please cite:
 - **Canonical-contig smart defaults:** By default every command operates on the primary human chromosomes (chr1–chr22, chrX, chrY, chrM). Add `--allcontigs` to opt into decoys, patches, or spike-ins when you need full genome coverage.
 - **On-the-fly site vetting:** Depth, N-content, and editing-support thresholds mirror the `bulk` heuristics so only confident loci advance to matrix assembly.
 - **Fearless concurrency:** Rayon thread pools, crossbeam channels, and reader pooling keep pileup traversal and sparse matrix assembly fully saturated on modern CPUs.
+- **Layered architecture:** The library is split into `core` (shared utilities & sparse ops), `engine` (parallel schedulers and position primitives), and `pipeline` (bam2mtx & call workflows), keeping reusable pieces lightweight and testable.
 - **Sparse-first analytics:** All matrix work is written against CSR matrices with adaptive density hints so memory usage tracks the number of edited positions, not the theoretical genome size.
 - **AnnData-native exports:** The toolkit produces `.h5ad` files that slot directly into Python-based workflows (Scanpy, scVI, Seurat via conversion).
 
@@ -22,16 +23,18 @@ If REDICAT supports your research, please cite:
 ## Repository Layout
 ```
 src/
-  main.rs                 # CLI entry point
+  main.rs                 # CLI entry point and subcommand wiring
   commands/
-    base_depth.rs         # `bulk` implementation
-    bam2mtx.rs            # `bam2mtx` CLI / two-pass wiring
-    call.rs               # End-to-end editing analysis
+    bulk/                 # Bulk depth CLI (args, processor, orchestration)
+    bam2mtx/              # Matrix converter CLI (args, workflow, engine)
+    call/                 # RNA editing pipeline CLI (args + pipeline)
+    common.rs             # Shared CLI/runtime helpers (threads, contigs)
   lib/
-    bam2mtx/              # BAM ➜ sparse matrix library
-    call/                 # Editing analytics primitives
-    par_granges.rs        # Parallel region iterator
-    read_filter.rs        # MAPQ-based filter abstraction
+    core/                 # Concurrency, IO, errors, read filters, sparse utilities
+    engine/               # Parallel genomic range scheduler + position structs
+    pipeline/
+      bam2mtx/            # BAM ➜ sparse matrix processing pipeline
+      call/               # RNA editing analytics pipeline
 ```
 
 ## Installation

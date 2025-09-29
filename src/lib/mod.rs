@@ -1,25 +1,28 @@
 //! REDICAT: RNA Editing Cellular Assessment Toolkit
 //!
 //! REDICAT is a highly parallelized utility for analyzing RNA editing events in single-cell RNA-seq data.
-//! The library provides functionality for:
-//! 1. Per-base analysis for indel detection in reduced representation sequencing
-//! 2. Single-cell matrix generation from BAM files
-//! 3. Parallel processing of genomic regions
-//! 4. RNA editing detection and analysis in single-cell data
+//! The library is organized into three layers:
 //!
-//! # Modules
+//! - [`core`]: Shared concurrency, IO, error, read filtering, and sparse matrix utilities
+//! - [`engine`]: High-performance processing primitives such as parallel genomic region schedulers
+//!   and position data structures
+//! - [`pipeline`]: End-user workflows, including BAM-to-matrix conversion and RNA editing analysis
 //!
-//! The main modules are:
-//! - [`bam2mtx`]: BAM to matrix conversion functionality for single-cell analysis
-//! - [`par_granges`]: Parallel processing of genomic regions
-//! - [`position`]: Data structures for genomic positions
-//! - [`read_filter`]: Filtering of reads based on various criteria
-//! - [`utils`]: Utility functions used throughout the library
-//! - [`call`]: RNA editing detection and analysis functionality
+//! For backwards compatibility, the legacy `call` and `bam2mtx` modules are re-exported from the
+//! new `pipeline` namespace.
 
-pub mod bam2mtx;
-pub mod call;
-pub mod par_granges;
-pub mod position;
-pub mod read_filter;
+pub mod core;
+pub mod engine;
+pub mod pipeline;
 pub mod utils;
+
+pub use pipeline::bam2mtx;
+pub use pipeline::call;
+
+/// Convenience exports for common helpers used across binaries and downstream crates.
+pub mod prelude {
+	pub use crate::core::prelude::*;
+	pub use crate::engine::{par_granges::RegionProcessor, ParGranges};
+	pub use crate::pipeline::call::{AnnDataContainer, EditingType, ReferenceGenome};
+}
+
