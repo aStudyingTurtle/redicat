@@ -85,6 +85,7 @@ Option reference:
 | `-q`  | `--mapquality`        | Minimum mapping quality accepted.                     | `255`           |
 | `-z`  | `--zero-base`         | Emit 0-based coordinates instead of 1-based.          | `false`         |
 | `-D`  | `--max-depth`         | Depth ceiling; near-max flagged as suspect.           | `8000`          |
+| `-s`/`-sD` | `--skip-max-depth`    | Skip sites whose observed depth exceeds this limit.    | `4294967295`    |
 | `-d`  | `--min-depth`         | Minimum coverage required to report a site.           | `10`            |
 | `-n`  | `--max-n-fraction`    | Maximum tolerated N fraction (depth / value).         | `20`            |
 | `-a`  | `--all`               | Report all sites rather than editing-enriched subset. | `false`         |
@@ -117,8 +118,8 @@ Option reference:
 | `-d`  | `--min-depth`         | Minimum non-`N` coverage to keep a site.                       | `10`     |
 | `-n`  | `--max-n-fraction`    | Maximum tolerated ambiguous fraction (depth / value).          | `20`     |
 | `-et` | `--editing-threshold` | Ensures at least two bases exceed `depth / editing-threshold`. | `1000`   |
-| `-D`  | `--max-depth`         | Depth threshold paired with `--skip-max-depth` to drop sites.  | `50000`  |
-| `-s`  | `--skip-max-depth`    | Skip sites once coverage exceeds `--max-depth` (alias `-sd`).  | `false`  |
+| `-D`  | `--max-depth`         | Cap on pileup traversal depth during matrix assembly.         | `50000`  |
+| `-s`/`-sD` | `--skip-max-depth`    | Threshold passed to the first-pass `bulk` run in `--two-pass` mode to drop oversaturated sites. | `4294967295`  |
 | `-S`  | `--stranded`          | Treat UMIs as strand-aware.                                    | `false`  |
 | —     | `--umi-tag`           | BAM tag containing UMI sequence.                               | `UB`     |
 | —     | `--cb-tag`            | BAM tag containing cell barcode.                               | `CB`     |
@@ -139,7 +140,7 @@ Important options:
 - **Reader pooling:** Each worker thread checks out an `IndexedReader` from a pool, avoiding reopen/seek penalties when iterating across genomic tiles.
 - **Triplet batching:** Sparse matrices are assembled from thread-local batches of `(row, col, value)` triplets, eliminating cross-thread contention.
 - **Adaptive chunking:** CLI `--chunksize` values govern the parallel granularity for both `ParGranges` (bulk) and `bam2mtx` chunk processors and double as the AnnData write batch size.
-- **Chunk-level fetch & depth guards:** `bam2mtx` batches contiguous sites per contig, records observed depth, and—when `--skip-max-depth` is active—skips oversaturated loci while still scanning the full pileup for other uses.
+- **Chunk-level fetch & depth guards:** `bam2mtx` batches contiguous sites per contig, records observed depth, and—in `--two-pass` mode—relies on the first-pass `bulk` run (honoring `--skip-max-depth`) to prune oversaturated loci before dense pileups reach the matrix stage.
 - **Progress-aware logging:** Chunk processors emit periodic `%` complete + ETA updates so multi-hour conversions remain easy to follow from the console.
 
 ## Testing & Data

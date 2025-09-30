@@ -57,9 +57,14 @@ pub struct Bam2MtxArgs {
     #[structopt(long = "max-depth", default_value = "50000", short = "D")]
     pub max_depth: u32,
 
-    /// Skip sites whose observed depth exceeds the configured max-depth (alias: -sd).
-    #[structopt(long = "skip-max-depth", short = "s", visible_alias = "sd")]
-    pub skip_max_depth: bool,
+    /// Skip sites whose observed depth exceeds this threshold when generating first-pass sites (`--two-pass`).
+    #[structopt(
+        long = "skip-max-depth",
+        short = "s",
+        visible_alias = "sD",
+        default_value = "4294967295"
+    )]
+    pub skip_max_depth: u32,
 
     /// UMI tag name.
     #[structopt(long, default_value = "UB")]
@@ -118,6 +123,7 @@ mod tests {
         assert_eq!(args.barcodes, PathBuf::from("barcodes.tsv"));
         assert_eq!(args.output, PathBuf::from("output.h5ad"));
         assert_eq!(args.max_depth, 50_000);
+        assert_eq!(args.skip_max_depth, u32::MAX);
         assert!(!args.two_pass);
     }
 }

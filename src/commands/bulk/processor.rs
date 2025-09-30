@@ -16,6 +16,7 @@ pub struct BaseProcessor {
     reads: PathBuf,
     coord_base: u32,
     max_depth: u32,
+    skip_max_depth: u32,
     min_depth: u32,
     max_n_fraction: u32,
     min_baseq: Option<u8>,
@@ -36,6 +37,7 @@ impl BaseProcessor {
             reads: config.reads.clone(),
             coord_base: config.coord_offset,
             max_depth: config.max_depth,
+            skip_max_depth: config.skip_max_depth,
             min_depth: config.min_depth,
             max_n_fraction: config.max_n_fraction,
             min_baseq: config.min_baseq.or(Some(30)),
@@ -96,6 +98,10 @@ impl RegionProcessor for BaseProcessor {
                 self.min_baseq,
             );
             pos.pos += self.coord_base;
+
+            if pos.depth > self.skip_max_depth {
+                continue;
+            }
 
             let should_include = if self.edited_mode {
                 let valid_value = max(pos.depth / self.editing_threshold, 2);
@@ -158,6 +164,7 @@ mod tests {
             mapquality: 255,
             coord_offset: 1,
             max_depth: 10_000,
+            skip_max_depth: u32::MAX,
             min_depth: 10,
             max_n_fraction: 20,
             report_all: true,

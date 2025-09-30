@@ -108,7 +108,10 @@ impl OptimizedChunkProcessor {
         let mut umi_consensus: FxHashMap<(String, String), u8> = FxHashMap::default();
         umi_consensus.reserve(self.umi_capacity_hint);
 
-        for pileup in reader.pileup() {
+        let mut pileups = reader.pileup();
+        pileups.set_max_depth(self.config.max_depth.min(i32::MAX as u32));
+
+        for pileup in pileups {
             let pileup = pileup?;
             let pile_pos = pileup.pos();
 
@@ -128,7 +131,6 @@ impl OptimizedChunkProcessor {
 
             counts.clear();
             umi_consensus.clear();
-            let mut processed: u32 = 0;
 
             for alignment in pileup.alignments() {
                 let record = alignment.record();
@@ -141,8 +143,6 @@ impl OptimizedChunkProcessor {
                     Some(q) => q,
                     None => continue,
                 };
-
-                processed = processed.saturating_add(1);
 
                 let base_qual = record.qual().get(qpos).copied().unwrap_or(0);
                 if base_qual < self.config.min_base_quality {
@@ -179,10 +179,6 @@ impl OptimizedChunkProcessor {
 
             let current_index = position_index;
             position_index += 1;
-
-            if self.config.skip_max_depth && processed > self.config.max_depth {
-                continue;
-            }
 
             for ((cell_barcode, _umi), encoded) in umi_consensus.drain() {
                 if encoded == UMI_CONFLICT_CODE {
