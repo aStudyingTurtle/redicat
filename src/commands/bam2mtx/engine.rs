@@ -109,7 +109,7 @@ impl OptimizedChunkProcessor {
         umi_consensus.reserve(self.umi_capacity_hint);
 
         let mut pileups = reader.pileup();
-        pileups.set_max_depth(self.config.max_depth.min(i32::MAX as u32));
+        pileups.set_max_depth(self.config.max_depth.min(u32::MAX));
 
         for pileup in pileups {
             let pileup = pileup?;

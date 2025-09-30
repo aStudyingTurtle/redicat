@@ -179,7 +179,7 @@ impl Default for BamProcessorConfig {
             max_n_fraction: 20,
             editing_threshold: 1000,
             stranded: true,
-            max_depth: 20000,
+            max_depth: u32::MAX,
             skip_max_depth: u32::MAX,
             umi_tag: "UB".to_string(),
             cell_barcode_tag: "CB".to_string(),
@@ -232,17 +232,17 @@ impl BamProcessor {
                 continue;
             }
 
-            let mut processed = 0u32;
+            // let mut processed = 0u32;
 
             for read in pileup.alignments() {
                 if !self.should_process_read(&read) {
                     continue;
                 }
 
-                processed = processed.saturating_add(1);
-                if processed > self.config.max_depth {
-                    break;
-                }
+                // processed = processed.saturating_add(1);
+                // if processed > self.config.max_depth {
+                //     break;
+                // }
 
                 let record = read.record();
                 let cell_barcode =

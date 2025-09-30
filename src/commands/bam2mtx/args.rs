@@ -54,7 +54,7 @@ pub struct Bam2MtxArgs {
     pub stranded: bool,
 
     /// Maximum pileup depth to examine per site.
-    #[structopt(long = "max-depth", default_value = "50000", short = "D")]
+    #[structopt(long = "max-depth", default_value = "4294967295", short = "D")]
     pub max_depth: u32,
 
     /// Skip sites whose observed depth exceeds this threshold when generating first-pass sites (`--two-pass`).
@@ -122,7 +122,6 @@ mod tests {
         assert_eq!(args.tsv, Some(PathBuf::from("test.tsv")));
         assert_eq!(args.barcodes, PathBuf::from("barcodes.tsv"));
         assert_eq!(args.output, PathBuf::from("output.h5ad"));
-        assert_eq!(args.max_depth, 50_000);
         assert_eq!(args.skip_max_depth, u32::MAX);
         assert!(!args.two_pass);
     }
