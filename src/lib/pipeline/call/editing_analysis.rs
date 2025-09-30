@@ -7,9 +7,9 @@
 
 use super::anndata_ops::AnnDataContainer;
 use super::base_matrix::*;
+use super::{EditingType, ReferenceGenome};
 use crate::core::error::{RedicatError, Result};
 use crate::core::sparse::SparseOps;
-use super::{EditingType, ReferenceGenome};
 use itertools::Itertools;
 use log::info;
 use nalgebra_sparse::CsrMatrix;

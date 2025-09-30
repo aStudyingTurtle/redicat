@@ -393,12 +393,13 @@ impl AnnDataConverter {
                                     );
                                 } else {
                                     // Unstranded: merge counts
-                                    let total_counts = crate::pipeline::bam2mtx::processor::BaseCounts {
-                                        a: counts.forward.a + counts.reverse.a,
-                                        t: counts.forward.t + counts.reverse.t,
-                                        g: counts.forward.g + counts.reverse.g,
-                                        c: counts.forward.c + counts.reverse.c,
-                                    };
+                                    let total_counts =
+                                        crate::pipeline::bam2mtx::processor::BaseCounts {
+                                            a: counts.forward.a + counts.reverse.a,
+                                            t: counts.forward.t + counts.reverse.t,
+                                            g: counts.forward.g + counts.reverse.g,
+                                            c: counts.forward.c + counts.reverse.c,
+                                        };
 
                                     Self::add_base_counts_to_triplets(
                                         &mut forward_triplets,

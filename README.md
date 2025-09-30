@@ -100,6 +100,7 @@ Highlights:
 - `--two-pass` scouts sites with `bulk --max-depth 8000`, trimming runaway pileups before the heavy second pass.
 - Reader pools and chunk-aware parallelism keep pileups cache-friendly while chunk staging bounds memory.
 - Output matrices respect the density hint supplied via `--matrix-density`.
+- Info-level progress logs report chunk-level completion percentage and ETA so long runs stay observable.
 
 Option reference:
 
@@ -116,7 +117,7 @@ Option reference:
 | `-d`  | `--min-depth`         | Minimum non-`N` coverage to keep a site.                       | `10`     |
 | `-n`  | `--max-n-fraction`    | Maximum tolerated ambiguous fraction (depth / value).          | `20`     |
 | `-et` | `--editing-threshold` | Ensures at least two bases exceed `depth / editing-threshold`. | `1000`   |
-| `-D`  | `--max-depth`         | Hard cap on reads inspected per site.                          | `50000`  |
+| `-D`  | `--max-depth`         | Depth threshold paired with `--skip-max-depth` to drop sites.  | `50000`  |
 | `-s`  | `--skip-max-depth`    | Skip sites once coverage exceeds `--max-depth` (alias `-sd`).  | `false`  |
 | `-S`  | `--stranded`          | Treat UMIs as strand-aware.                                    | `false`  |
 | —     | `--umi-tag`           | BAM tag containing UMI sequence.                               | `UB`     |
@@ -138,7 +139,8 @@ Important options:
 - **Reader pooling:** Each worker thread checks out an `IndexedReader` from a pool, avoiding reopen/seek penalties when iterating across genomic tiles.
 - **Triplet batching:** Sparse matrices are assembled from thread-local batches of `(row, col, value)` triplets, eliminating cross-thread contention.
 - **Adaptive chunking:** CLI `--chunksize` values govern the parallel granularity for both `ParGranges` (bulk) and `bam2mtx` chunk processors and double as the AnnData write batch size.
-- **Chunk-level fetch & depth guards:** `bam2mtx` batches contiguous sites per contig, enforces configurable max-depth caps, and drops oversaturated loci when requested to keep runtime predictable.
+- **Chunk-level fetch & depth guards:** `bam2mtx` batches contiguous sites per contig, records observed depth, and—when `--skip-max-depth` is active—skips oversaturated loci while still scanning the full pileup for other uses.
+- **Progress-aware logging:** Chunk processors emit periodic `%` complete + ETA updates so multi-hour conversions remain easy to follow from the console.
 
 ## Testing & Data
 ```bash

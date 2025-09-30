@@ -26,11 +26,11 @@ use rust_htslib::bam::{self, pileup::Alignment, Read};
 use rustc_hash::FxHashMap;
 use smartstring::alias::String as CompactString;
 
+use crate::engine::par_granges::RegionProcessor;
 use crate::pipeline::bam2mtx::{
     barcode::BarcodeProcessor,
     processor::{self, BamProcessorConfig, PositionData, StrandBaseCounts, UMI_CONFLICT_CODE},
 };
-use crate::engine::par_granges::RegionProcessor;
 
 /// Region processor for bam2mtx that implements the RegionProcessor trait
 pub struct Bam2MtxProcessor {

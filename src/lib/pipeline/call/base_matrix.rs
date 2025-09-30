@@ -194,7 +194,6 @@ fn filter_dataframe_by_indices(df: &DataFrame, indices: &[usize]) -> Result<Data
         "idx".into(),
         indices.iter().map(|&idx| idx as u32).collect(),
     );
-    df.take(&idx_chunked).map_err(|e| {
-        RedicatError::DataProcessing(format!("Failed to filter DataFrame: {}", e))
-    })
+    df.take(&idx_chunked)
+        .map_err(|e| RedicatError::DataProcessing(format!("Failed to filter DataFrame: {}", e)))
 }

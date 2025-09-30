@@ -129,7 +129,6 @@ impl OptimizedChunkProcessor {
             counts.clear();
             umi_consensus.clear();
             let mut processed: u32 = 0;
-            let mut truncated = false;
 
             for alignment in pileup.alignments() {
                 let record = alignment.record();
@@ -144,10 +143,6 @@ impl OptimizedChunkProcessor {
                 };
 
                 processed = processed.saturating_add(1);
-                if processed > self.config.max_depth {
-                    truncated = true;
-                    break;
-                }
 
                 let base_qual = record.qual().get(qpos).copied().unwrap_or(0);
                 if base_qual < self.config.min_base_quality {
@@ -185,7 +180,7 @@ impl OptimizedChunkProcessor {
             let current_index = position_index;
             position_index += 1;
 
-            if truncated && self.config.skip_max_depth {
+            if self.config.skip_max_depth && processed > self.config.max_depth {
                 continue;
             }
 
