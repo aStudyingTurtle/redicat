@@ -19,10 +19,7 @@
 pub mod anndata_output;
 pub mod barcode;
 pub mod processor;
-pub mod region_processor;
-pub mod utils;
 
 pub use anndata_output::AnnDataConverter;
 pub use barcode::BarcodeProcessor;
 pub use processor::BamProcessor;
-pub use region_processor::Bam2MtxProcessor;

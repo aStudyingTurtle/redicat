@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use rust_htslib::bam::{self, pileup::Alignment, record::Record, Read};
 use rustc_hash::FxHashMap;
 
@@ -45,6 +45,58 @@ pub struct PositionData {
 
 /// Consensus code used to indicate conflicting UMI calls
 pub const UMI_CONFLICT_CODE: u8 = u8::MAX;
+
+fn clean_tag_value(raw: &str) -> Option<String> {
+    let clean = raw.split('-').next().unwrap_or(raw).trim();
+    if clean.is_empty() || clean == "-" {
+        None
+    } else {
+        Some(clean.to_string())
+    }
+}
+
+/// Extract and normalize a cell barcode from the requested BAM tag.
+pub fn decode_cell_barcode(record: &Record, tag: &[u8]) -> Result<Option<String>> {
+    match record.aux(tag) {
+        Ok(bam::record::Aux::String(s)) => Ok(clean_tag_value(s)),
+        Ok(bam::record::Aux::ArrayU8(arr)) => {
+            let bytes: Vec<u8> = arr.iter().collect();
+            let raw = std::str::from_utf8(&bytes)?;
+            Ok(clean_tag_value(raw))
+        }
+        Ok(_) => Ok(None),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Extract and normalize a UMI from the requested BAM tag.
+pub fn decode_umi(record: &Record, tag: &[u8]) -> Result<Option<String>> {
+    match record.aux(tag) {
+        Ok(bam::record::Aux::String(s)) => Ok(clean_tag_value(s)),
+        Ok(bam::record::Aux::ArrayU8(arr)) => {
+            let bytes: Vec<u8> = arr.iter().collect();
+            let raw = std::str::from_utf8(&bytes)?;
+            Ok(clean_tag_value(raw))
+        }
+        Ok(_) => Ok(None),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Retrieve the canonical base at the requested query position.
+pub fn decode_base(record: &Record, qpos: Option<usize>) -> Result<char> {
+    let qpos = qpos.ok_or_else(|| anyhow!("Invalid query position"))?;
+    let seq = record.seq();
+    let base = seq.as_bytes()[qpos];
+
+    Ok(match base {
+        b'A' | b'a' => 'A',
+        b'T' | b't' => 'T',
+        b'G' | b'g' => 'G',
+        b'C' | b'c' => 'C',
+        _ => 'N',
+    })
+}
 
 #[inline]
 pub fn encode_call(stranded: bool, base: char, is_reverse: bool) -> Option<u8> {
@@ -193,18 +245,22 @@ impl BamProcessor {
                 }
 
                 let record = read.record();
-                let cell_barcode = self.get_cell_barcode(&record)?;
+                let cell_barcode =
+                    match decode_cell_barcode(&record, self.config.cell_barcode_tag.as_bytes())? {
+                        Some(barcode) => barcode,
+                        None => continue,
+                    };
 
                 if !self.barcode_processor.is_valid(&cell_barcode) {
                     continue;
                 }
 
-                let umi = self.get_umi(&record)?;
-                if umi == "-" {
-                    continue;
-                }
+                let umi = match decode_umi(&record, self.config.umi_tag.as_bytes())? {
+                    Some(umi) => umi,
+                    None => continue,
+                };
 
-                let base = self.get_base_at_position(&record, read.qpos())?;
+                let base = decode_base(&record, read.qpos())?;
                 if let Some(encoded) = encode_call(self.config.stranded, base, record.is_reverse())
                 {
                     umi_consensus
@@ -266,125 +322,4 @@ impl BamProcessor {
 
         true
     }
-
-    /// Get cell barcode from record
-    fn get_cell_barcode(&self, record: &Record) -> Result<String> {
-        let tag = self.config.cell_barcode_tag.as_bytes();
-
-        match record.aux(tag) {
-            Ok(value) => {
-                match value {
-                    bam::record::Aux::String(s) => {
-                        let barcode = s;
-                        // Handle barcodes with suffixes like "-1"
-                        Ok(barcode.split('-').next().unwrap_or(barcode).to_string())
-                    }
-                    bam::record::Aux::ArrayU8(arr) => {
-                        let u8_vec: Vec<u8> = arr.iter().collect();
-                        let barcode_str = std::str::from_utf8(&u8_vec)?;
-                        Ok(barcode_str
-                            .split('-')
-                            .next()
-                            .unwrap_or(barcode_str)
-                            .to_string())
-                    }
-                    _ => Ok("-".to_string()),
-                }
-            }
-            Err(_) => Ok("-".to_string()),
-        }
-    }
-
-    /// Get UMI from record
-    fn get_umi(&self, record: &Record) -> Result<String> {
-        let tag = self.config.umi_tag.as_bytes();
-
-        match record.aux(tag) {
-            Ok(value) => match value {
-                bam::record::Aux::String(s) => Ok(s.to_string()),
-                bam::record::Aux::ArrayU8(arr) => {
-                    let u8_vec: Vec<u8> = arr.iter().collect();
-                    Ok(std::str::from_utf8(&u8_vec)?.to_string())
-                }
-                _ => Ok("-".to_string()),
-            },
-            Err(_) => Ok("-".to_string()),
-        }
-    }
-
-    /// Get base at specific position
-    fn get_base_at_position(&self, record: &Record, qpos: Option<usize>) -> Result<char> {
-        let qpos = qpos.ok_or_else(|| anyhow::anyhow!("Invalid query position"))?;
-
-        let seq = record.seq();
-        let base = seq.as_bytes()[qpos];
-
-        match base {
-            b'A' | b'a' => Ok('A'),
-            b'T' | b't' => Ok('T'),
-            b'G' | b'g' => Ok('G'),
-            b'C' | b'c' => Ok('C'),
-            _ => Ok('N'),
-        }
-    }
-}
-
-/// Process multiple positions in parallel
-pub fn process_positions_parallel(
-    bam_path: &Path,
-    positions: &[(String, u64)],
-    config: &BamProcessorConfig,
-    barcode_processor: Arc<BarcodeProcessor>,
-) -> Result<Vec<PositionData>> {
-    use rayon::prelude::*;
-
-    let processor = BamProcessor::new(config.clone(), barcode_processor);
-
-    let results: Result<Vec<_>> = positions
-        .par_iter()
-        .map(|(chrom, pos)| processor.process_position(bam_path, chrom, *pos))
-        .collect();
-
-    results
-}
-
-/// Optimized position processing to reduce memory allocations
-pub fn process_positions_optimized(
-    bam_path: &Path,
-    positions: &[(String, u64)],
-    config: &BamProcessorConfig,
-    barcode_processor: Arc<BarcodeProcessor>,
-) -> Result<Vec<PositionData>> {
-    use rayon::prelude::*;
-
-    use std::sync::Arc;
-    let processor = Arc::new(BamProcessor::new(config.clone(), barcode_processor));
-
-    // Process positions by chromosome to minimize BAM file seeking
-    let mut positions_by_chrom: HashMap<String, Vec<u64>> = HashMap::new();
-    for (chrom, pos) in positions {
-        positions_by_chrom
-            .entry(chrom.clone())
-            .or_default()
-            .push(*pos);
-    }
-
-    // Sort positions within each chromosome
-    for positions in positions_by_chrom.values_mut() {
-        positions.sort_unstable();
-    }
-
-    let results: Result<Vec<_>> = positions_by_chrom
-        .into_iter()
-        .par_bridge()
-        .flat_map(|(chrom, positions)| {
-            let processor = processor.clone();
-            positions
-                .into_iter()
-                .map(move |pos| processor.process_position(bam_path, &chrom, pos))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    results
 }

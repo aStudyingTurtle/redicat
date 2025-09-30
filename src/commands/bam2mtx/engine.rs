@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use parking_lot::Mutex;
 use redicat_lib::bam2mtx::barcode::BarcodeProcessor;
 use redicat_lib::bam2mtx::processor::{
-    apply_encoded_call, encode_call, BamProcessorConfig, PositionData, StrandBaseCounts,
-    UMI_CONFLICT_CODE,
+    apply_encoded_call, decode_base, decode_cell_barcode, decode_umi, encode_call,
+    BamProcessorConfig, PositionData, StrandBaseCounts, UMI_CONFLICT_CODE,
 };
 use rust_htslib::bam::{self, Read};
 use rustc_hash::FxHashMap;
@@ -149,20 +149,24 @@ impl OptimizedChunkProcessor {
                     continue;
                 }
 
-                let base = self.get_base_at_position(&record, Some(qpos))?;
+                let base = decode_base(&record, Some(qpos))?;
                 if base == 'N' {
                     continue;
                 }
 
-                let cell_barcode = self.get_cell_barcode(&record)?;
+                let cell_barcode =
+                    match decode_cell_barcode(&record, self.config.cell_barcode_tag.as_bytes())? {
+                        Some(barcode) => barcode,
+                        None => continue,
+                    };
                 if !self.barcode_processor.is_valid(&cell_barcode) {
                     continue;
                 }
 
-                let umi = self.get_umi(&record)?;
-                if umi == "-" {
-                    continue;
-                }
+                let umi = match decode_umi(&record, self.config.umi_tag.as_bytes())? {
+                    Some(umi) => umi,
+                    None => continue,
+                };
 
                 if let Some(encoded) = encode_call(self.config.stranded, base, record.is_reverse())
                 {
@@ -208,56 +212,5 @@ impl OptimizedChunkProcessor {
         }
 
         Ok(chunk_results)
-    }
-
-    fn get_cell_barcode(&self, record: &bam::Record) -> Result<String> {
-        let tag = self.config.cell_barcode_tag.as_bytes();
-        match record.aux(tag) {
-            Ok(bam::record::Aux::String(s)) => {
-                let clean_barcode = s.split('-').next().unwrap_or(s);
-                Ok(clean_barcode.to_string())
-            }
-            Ok(bam::record::Aux::ArrayU8(arr)) => {
-                let data: Vec<u8> = arr.iter().collect();
-                match std::str::from_utf8(&data) {
-                    Ok(barcode) => {
-                        let clean_barcode = barcode.split('-').next().unwrap_or(barcode);
-                        Ok(clean_barcode.to_string())
-                    }
-                    Err(_) => Ok("-".to_string()),
-                }
-            }
-            _ => Ok("-".to_string()),
-        }
-    }
-
-    fn get_umi(&self, record: &bam::Record) -> Result<String> {
-        let tag = self.config.umi_tag.as_bytes();
-        match record.aux(tag) {
-            Ok(bam::record::Aux::String(s)) => Ok(s.to_string()),
-            Ok(bam::record::Aux::ArrayU8(arr)) => {
-                let bytes: Vec<u8> = arr.iter().collect();
-                match std::str::from_utf8(&bytes) {
-                    Ok(umi) => Ok(umi.to_string()),
-                    Err(_) => Ok("-".to_string()),
-                }
-            }
-            _ => Ok("-".to_string()),
-        }
-    }
-
-    fn get_base_at_position(&self, record: &bam::Record, qpos: Option<usize>) -> Result<char> {
-        let qpos = qpos.ok_or_else(|| anyhow!("Invalid query position"))?;
-        let seq = record.seq();
-        let base = seq.as_bytes()[qpos];
-
-        let base = match base {
-            b'A' | b'a' => 'A',
-            b'T' | b't' => 'T',
-            b'G' | b'g' => 'G',
-            b'C' | b'c' => 'C',
-            _ => 'N',
-        };
-        Ok(base)
     }
 }
