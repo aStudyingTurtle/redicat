@@ -169,7 +169,7 @@ impl BamProcessor {
         // Fetch the region
         reader.fetch((tid, start_pos, end_pos))?;
         let mut pileups: bam::pileup::Pileups<'_, bam::IndexedReader> = reader.pileup();
-        pileups.set_max_depth(u32::max_value());
+        pileups.set_max_depth(u32::MAX);
         let mut counts: FxHashMap<String, StrandBaseCounts> = FxHashMap::default();
         let mut umi_consensus: FxHashMap<(String, String), u8> = FxHashMap::default();
 
@@ -226,9 +226,7 @@ impl BamProcessor {
                 continue;
             }
 
-            let counts_entry = counts
-                .entry(cell_barcode)
-                .or_insert_with(StrandBaseCounts::default);
+            let counts_entry = counts.entry(cell_barcode).or_default();
 
             apply_encoded_call(self.config.stranded, encoded, counts_entry);
         }
@@ -367,7 +365,7 @@ pub fn process_positions_optimized(
     for (chrom, pos) in positions {
         positions_by_chrom
             .entry(chrom.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(*pos);
     }
 

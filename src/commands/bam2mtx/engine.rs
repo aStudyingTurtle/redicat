@@ -185,9 +185,7 @@ impl OptimizedChunkProcessor {
                     continue;
                 }
 
-                let counts_entry = counts
-                    .entry(cell_barcode)
-                    .or_insert_with(StrandBaseCounts::default);
+                let counts_entry = counts.entry(cell_barcode).or_default();
 
                 apply_encoded_call(self.config.stranded, encoded, counts_entry);
             }

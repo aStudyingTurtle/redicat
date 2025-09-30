@@ -178,10 +178,7 @@ impl<R: RegionProcessor + Send + Sync> Engine<R> {
             None => intervals::header_to_intervals(&header, self.chunksize)?,
         };
 
-        let serial_step_size = self
-            .chunksize
-            .checked_mul(self.threads as u32)
-            .unwrap_or(u32::MAX);
+        let serial_step_size = self.chunksize.saturating_mul(self.threads as u32);
         info!("Processing {} contigs", intervals.len());
 
         intervals
@@ -202,7 +199,7 @@ impl<R: RegionProcessor + Send + Sync> Engine<R> {
                 }
 
                 for chunk_start in (0..tid_end).step_by(serial_step_size as usize) {
-                    let chunk_end = std::cmp::min(chunk_start as u32 + serial_step_size, tid_end);
+                    let chunk_end = std::cmp::min(chunk_start + serial_step_size, tid_end);
 
                     trace!(
                         "Batch processing {}:{}-{}",

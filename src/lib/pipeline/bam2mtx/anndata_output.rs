@@ -57,7 +57,7 @@ unsafe impl Sync for HighPerformanceMatrixBuilder {}
 impl HighPerformanceMatrixBuilder {
     fn new(shape: (usize, usize), estimated_nnz: usize) -> Self {
         let num_threads = rayon::current_num_threads();
-        let per_thread_capacity = (estimated_nnz + num_threads - 1) / num_threads;
+        let per_thread_capacity = estimated_nnz.div_ceil(num_threads);
 
         let thread_local_triplets = (0..num_threads)
             .map(|_| UnsafeCell::new(Vec::with_capacity(per_thread_capacity)))
@@ -337,7 +337,7 @@ impl AnnDataConverter {
         let chunk_size = std::cmp::min(self.config.chunk_size, 5000);
         info!(
             "    Processing {} chunks of size {}",
-            (position_data.len() + chunk_size - 1) / chunk_size,
+            position_data.len().div_ceil(chunk_size),
             chunk_size
         );
 

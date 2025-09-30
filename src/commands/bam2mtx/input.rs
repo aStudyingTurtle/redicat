@@ -23,7 +23,7 @@ pub fn read_positions<P: AsRef<Path>>(tsv_path: P) -> Result<Vec<GenomicPosition
     let path = tsv_path.as_ref();
     let file = File::open(path)?;
 
-    let reader: Box<dyn BufRead> = if path.extension().map_or(false, |ext| ext == "gz") {
+    let reader: Box<dyn BufRead> = if path.extension().is_some_and(|ext| ext == "gz") {
         Box::new(BufReader::with_capacity(256 * 1024, GzDecoder::new(file)))
     } else {
         Box::new(BufReader::with_capacity(256 * 1024, file))
@@ -66,14 +66,14 @@ pub fn chunk_positions(
         return Vec::new();
     }
 
-    let mut chunks = Vec::with_capacity((positions.len() + chunk_size - 1) / chunk_size);
+    let mut chunks = Vec::with_capacity(positions.len().div_ceil(chunk_size));
     let mut current_chunk = Vec::with_capacity(chunk_size);
     let mut current_chrom: Option<String> = None;
 
     for position in positions.drain(..) {
         if current_chrom
             .as_ref()
-            .map_or(false, |chromosome| chromosome != &position.chrom)
+            .is_some_and(|chromosome| chromosome != &position.chrom)
             && !current_chunk.is_empty()
         {
             chunks.push(PositionChunk {

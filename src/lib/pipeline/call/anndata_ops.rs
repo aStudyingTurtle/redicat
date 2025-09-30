@@ -555,7 +555,7 @@ fn read_x_matrix(adata: &AnnData<H5>) -> Result<Option<CsrMatrix<f64>>> {
     };
 
     let shape = x_elem.shape();
-    if shape.ndim() == 0 || shape.as_ref().iter().any(|&dim| dim == 0) {
+    if shape.ndim() == 0 || shape.as_ref().contains(&0) {
         debug!("Empty X matrix shape: {:?}", shape.as_ref());
         return Ok(None);
     }
@@ -755,16 +755,16 @@ fn estimate_dataframe_size(df: &DataFrame) -> usize {
 
 fn estimate_csr_matrix_size_f64(matrix: &CsrMatrix<f64>) -> usize {
     let (row_offsets, col_indices, values) = matrix.csr_data();
-    row_offsets.len() * std::mem::size_of::<usize>()
-        + col_indices.len() * std::mem::size_of::<usize>()
-        + values.len() * std::mem::size_of::<f64>()
+    std::mem::size_of_val(row_offsets)
+        + std::mem::size_of_val(col_indices)
+        + std::mem::size_of_val(values)
 }
 
 fn estimate_csr_matrix_size_u32(matrix: &CsrMatrix<u32>) -> usize {
     let (row_offsets, col_indices, values) = matrix.csr_data();
-    row_offsets.len() * std::mem::size_of::<usize>()
-        + col_indices.len() * std::mem::size_of::<usize>()
-        + values.len() * std::mem::size_of::<u32>()
+    std::mem::size_of_val(row_offsets)
+        + std::mem::size_of_val(col_indices)
+        + std::mem::size_of_val(values)
 }
 
 /// Estimate total memory footprint in bytes for the AnnDataContainer

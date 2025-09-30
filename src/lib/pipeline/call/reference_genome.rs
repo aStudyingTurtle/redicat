@@ -268,7 +268,7 @@ impl ReferenceGenome {
         use std::fs::File;
         use std::io::{BufRead, BufReader};
 
-        let file = File::open(index_path).map_err(|e| RedicatError::Io(e))?;
+        let file = File::open(index_path).map_err(RedicatError::Io)?;
 
         let reader = BufReader::new(file);
         let sequences: Vec<String> = reader

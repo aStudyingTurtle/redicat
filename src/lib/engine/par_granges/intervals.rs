@@ -19,9 +19,9 @@ pub(crate) fn header_to_intervals(
             .try_into()
             .map_err(|_| anyhow!("Target length overflow for TID {}", tid))?;
         for start in (0..tid_len).step_by(chunksize as usize) {
-            let stop = std::cmp::min(start as u32 + chunksize, tid_len);
+            let stop = std::cmp::min(start + chunksize, tid_len);
             intervals[tid as usize].push(Interval {
-                start: start as u32,
+                start,
                 stop,
                 val: (),
             });

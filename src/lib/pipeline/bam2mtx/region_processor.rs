@@ -76,7 +76,7 @@ impl Bam2MtxProcessor {
         let mut counts: FxHashMap<CompactString, StrandBaseCounts> = FxHashMap::default();
         let mut umi_consensus: FxHashMap<(CompactString, CompactString), u8> = FxHashMap::default();
 
-        let barcode_capacity = self.barcode_processor.len().max(64).min(4096);
+        let barcode_capacity = self.barcode_processor.len().clamp(64, 4096);
         counts.reserve(barcode_capacity);
         umi_consensus.reserve(barcode_capacity * 4);
 
@@ -140,9 +140,7 @@ impl Bam2MtxProcessor {
                 continue;
             }
 
-            let counts_entry = counts
-                .entry(cell_barcode)
-                .or_insert_with(StrandBaseCounts::default);
+            let counts_entry = counts.entry(cell_barcode).or_default();
 
             processor::apply_encoded_call(self.config.stranded, encoded, counts_entry);
         }

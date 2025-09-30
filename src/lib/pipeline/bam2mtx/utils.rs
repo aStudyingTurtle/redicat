@@ -20,7 +20,7 @@ pub fn read_positions_from_tsv<P: AsRef<Path>>(
     // Create reader based on file extension
     let file = File::open(&path)?;
     let buf_reader: Box<dyn std::io::BufRead> =
-        if path.as_ref().extension().map_or(false, |ext| ext == "gz") {
+        if path.as_ref().extension().is_some_and(|ext| ext == "gz") {
             // Handle .tsv.gz files
             let decoder = GzDecoder::new(file);
             Box::new(BufReader::new(decoder))

@@ -46,7 +46,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     let mut positions = read_positions(&positions_path)?;
     if !args.all_contigs {
         let before = positions.len();
-        positions = filter_positions_by(positions, |chrom| is_standard_contig(chrom));
+        positions = filter_positions_by(positions, is_standard_contig);
         info!(
             "Filtered positions to canonical contigs: {} → {} entries",
             before,
@@ -101,7 +101,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
         .try_fold(Vec::new, |mut acc, (_idx, chunk)| {
             let mut data = processor.process_chunk(&chunk)?;
             let completed = processed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
-            if completed == total_chunks || completed % log_step == 0 {
+            if completed == total_chunks || completed.is_multiple_of(log_step) {
                 let elapsed = processing_start.elapsed();
                 let percent = (completed as f64 / total_chunks as f64) * 100.0;
                 let remaining = estimate_remaining_time(elapsed, completed, total_chunks);

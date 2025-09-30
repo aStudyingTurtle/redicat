@@ -125,7 +125,7 @@ impl PileupPosition {
                 .expect("Pileup alignment should have a query position");
 
             // 使用 map_or 优雅地处理 Option，判断碱基质量是否过低
-            let is_low_qual = base_filter.map_or(false, |cutoff| record.qual()[qpos] < cutoff);
+            let is_low_qual = base_filter.is_some_and(|cutoff| record.qual()[qpos] < cutoff);
 
             if is_low_qual {
                 self.n += 1;

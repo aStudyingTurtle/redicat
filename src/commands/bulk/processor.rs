@@ -74,10 +74,7 @@ impl RegionProcessor for BaseProcessor {
             .fetch((tid, start, stop))
             .expect("Fetched requested region");
         let mut pileup = reader.pileup();
-        pileup.set_max_depth(std::cmp::min(
-            i32::max_value().try_into().unwrap(),
-            self.max_depth,
-        ));
+        pileup.set_max_depth(std::cmp::min(i32::MAX.try_into().unwrap(), self.max_depth));
 
         let estimated = (stop.saturating_sub(start) / 10).max(16) as usize;
         let mut result = Vec::with_capacity(estimated);
