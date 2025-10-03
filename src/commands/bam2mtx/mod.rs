@@ -12,7 +12,7 @@ use redicat_lib::bam2mtx::processor::BamProcessorConfig;
 use redicat_lib::utils;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::commands::{common, is_standard_contig};
 
@@ -102,15 +102,12 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
             let mut data = processor.process_chunk(&chunk)?;
             let completed = processed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
             if completed == total_chunks || completed.is_multiple_of(log_step) {
-                let elapsed = processing_start.elapsed();
                 let percent = (completed as f64 / total_chunks as f64) * 100.0;
-                let remaining = estimate_remaining_time(elapsed, completed, total_chunks);
                 info!(
-                    "Processed {:.1}% ({} / {} chunks) – ETA {}",
+                    "Processed {:.1}% ({} / {} chunks)",
                     percent,
                     completed,
-                    total_chunks,
-                    format_duration(remaining)
+                    total_chunks
                 );
             }
             acc.append(&mut data);
@@ -135,40 +132,4 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     info!("bam2mtx workflow finished in {:?}", start_time.elapsed());
 
     Ok(())
-}
-
-fn estimate_remaining_time(elapsed: Duration, completed: usize, total: usize) -> Duration {
-    if completed == 0 || completed >= total {
-        return Duration::from_secs(0);
-    }
-
-    let remaining = total - completed;
-    let per_chunk = elapsed.as_secs_f64() / completed as f64;
-    if !per_chunk.is_finite() {
-        return Duration::from_secs(0);
-    }
-
-    Duration::from_secs_f64(remaining as f64 * per_chunk)
-}
-
-fn format_duration(duration: Duration) -> String {
-    if duration.is_zero() {
-        return "0s".to_string();
-    }
-
-    let total_seconds = duration.as_secs();
-    if total_seconds >= 3600 {
-        let hours = total_seconds / 3600;
-        let minutes = (total_seconds % 3600) / 60;
-        let seconds = total_seconds % 60;
-        format!("{}h {}m {}s", hours, minutes, seconds)
-    } else if total_seconds >= 60 {
-        let minutes = total_seconds / 60;
-        let seconds = total_seconds % 60;
-        format!("{}m {}s", minutes, seconds)
-    } else if total_seconds > 0 {
-        format!("{}s", total_seconds)
-    } else {
-        format!("{:.1}s", duration.as_secs_f64())
-    }
 }

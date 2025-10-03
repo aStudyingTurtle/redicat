@@ -179,7 +179,22 @@ impl<R: RegionProcessor + Send + Sync> Engine<R> {
         };
 
         let serial_step_size = self.chunksize.saturating_mul(self.threads as u32);
-        info!("Processing {} contigs", intervals.len());
+        // info!("Processing {} contigs", intervals.len());
+
+        // Calculate total chunks across all contigs
+        let mut total_chunks = 0u32;
+        let _serial_step_size = self.chunksize.saturating_mul(self.threads as u32);
+        for (tid_len, _) in target_info.iter() {
+            if *tid_len > 0 {
+                total_chunks += ((*tid_len - 1) / serial_step_size) + 1;
+            }
+        }
+
+        // Use serial_step_size in trace logging to avoid unused variable warning
+        trace!("Using serial step size: {}", serial_step_size);
+
+        let processed_chunks = std::sync::atomic::AtomicUsize::new(0);
+        let log_step = std::cmp::max(1, total_chunks as usize / 10);
 
         intervals
             .into_par_iter()
@@ -219,6 +234,17 @@ impl<R: RegionProcessor + Send + Sync> Engine<R> {
 
                     if region_intervals.is_empty() {
                         continue;
+                    }
+
+                    let completed = processed_chunks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if completed == total_chunks as usize || completed % log_step == 0 {
+                        let percent = (completed as f64 / total_chunks as f64) * 100.0;
+                        info!(
+                            "Processed {:.1}% ({} / {} chunks)",
+                            percent,
+                            completed,
+                            total_chunks
+                        );
                     }
 
                     region_intervals.into_par_iter().for_each_with(
