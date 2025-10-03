@@ -62,7 +62,7 @@ pub struct Bam2MtxArgs {
         long = "skip-max-depth",
         short = "s",
         visible_alias = "sD",
-        default_value = "2147483647 "
+        default_value = "2147483647"
     )]
     pub skip_max_depth: u32,
 
