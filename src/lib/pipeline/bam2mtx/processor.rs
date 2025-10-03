@@ -221,7 +221,7 @@ impl BamProcessor {
         // Fetch the region
         reader.fetch((tid, start_pos, end_pos))?;
         let mut pileups: bam::pileup::Pileups<'_, bam::IndexedReader> = reader.pileup();
-        pileups.set_max_depth(u32::MAX);
+        pileups.set_max_depth(i32::MAX as u32);
         let mut counts: FxHashMap<String, StrandBaseCounts> = FxHashMap::default();
         let mut umi_consensus: FxHashMap<(String, String), u8> = FxHashMap::default();
 
