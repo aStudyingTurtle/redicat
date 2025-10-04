@@ -147,6 +147,21 @@ impl PileupPosition {
         }
     }
 
+    /// Flag the position when observed depth is within 1% of the configured max depth.
+    #[inline]
+    pub fn mark_near_max_depth(&mut self, max_depth: u32) {
+        if max_depth == 0 {
+            self.near_max_depth = false;
+            return;
+        }
+
+        let max_depth_u32 = u32::from(max_depth);
+        let tolerance = (max_depth_u32 + 99) / 100;
+
+        self.near_max_depth =
+            max_depth_u32.saturating_sub(self.depth) <= tolerance;
+    }
+
     /// Convert a pileup into a `Position`.
     ///
     /// This will walk over each of the alignments and count the number each nucleotide it finds.
@@ -193,6 +208,30 @@ mod tests {
     use super::*;
     use rust_htslib::bam::{IndexedReader, Read};
     use std::path::Path;
+
+    #[test]
+    fn mark_near_max_depth_accounts_for_failures() {
+        let mut position = PileupPosition {
+            depth: 98_500,
+            fail: 900,
+            ..Default::default()
+        };
+
+        position.mark_near_max_depth(100_000);
+        assert!(!position.near_max_depth);
+
+        position.depth = 80_000;
+        position.fail = 0;
+        position.near_max_depth = true;
+        position.mark_near_max_depth(100_000);
+        assert!(!position.near_max_depth);
+
+        position.depth = 10;
+        position.fail = 0;
+        position.mark_near_max_depth(0);
+        assert!(!position.near_max_depth);
+    }
+
     #[test]
     fn test_pileup_position_from_bam() {
         let bam_path = Path::new("test/chr22.bam");

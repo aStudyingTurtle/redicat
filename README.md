@@ -13,6 +13,7 @@ If REDICAT supports your research, please cite:
 - **Canonical-contig smart defaults:** By default every command operates on the primary human chromosomes (chr1–chr22, chrX, chrY, chrM). Add `--allcontigs` to opt into decoys, patches, or spike-ins when you need full genome coverage.
 - **On-the-fly site vetting:** Depth, N-content, and editing-support thresholds mirror the `bulk` heuristics so only confident loci advance to matrix assembly.
 - **Fearless concurrency:** Rayon thread pools, crossbeam channels, and reader pooling keep pileup traversal and sparse matrix assembly fully saturated on modern CPUs.
+- **Depth-aware chunking:** `bam2mtx` automatically falls back to `--chunk-size-max-depth` for `NEAR_MAX_DEPTH` loci, containing pathological pileups while leaving regular regions on the wide `--chunksize` cadence.
 - **Layered architecture:** The library is split into `core` (shared utilities & sparse ops), `engine` (parallel schedulers and position primitives), and `pipeline` (bam2mtx & call workflows), keeping reusable pieces lightweight and testable.
 - **Sparse-first analytics:** All matrix work is written against CSR matrices with adaptive density hints so memory usage tracks the number of edited positions, not the theoretical genome size.
 - **AnnData-native exports:** The toolkit produces `.h5ad` files that slot directly into Python-based workflows (Scanpy, scVI, Seurat via conversion).
@@ -71,6 +72,7 @@ Add `--allcontigs` to any command that should consider every contig in the BAM h
 ## Subcommands
 ### `bulk`
 Calculates per-base depth and nucleotide counts across a BAM/CRAM. Filtering options allow you to tune MAPQ, base quality, minimum depth, and an editing-specific heuristic. When `--skip-max-depth` is set to a value less than 2,000,000,000, the `--max-depth` value is automatically adjusted to `--skip-max-depth + 1000`. Results stream to a bgzip-compressed TSV.
+`near_max_depth` flags now consider filtered (`FAIL`) reads alongside called bases, ensuring the 1% ceiling matches the effective pileup depth returned by htslib.
 Some libraries of `bulk` were taken form the [`perbase`](https://github.com/sstadick/perbase) project.
 
 Option reference:
@@ -124,7 +126,8 @@ Option reference:
 | —     | `--umi-tag`           | BAM tag containing UMI sequence.                               | `UB`     |
 | —     | `--cb-tag`            | BAM tag containing cell barcode.                               | `CB`     |
 | `-r`  | `--reference`         | Reference FASTA (required for CRAM).                           | optional |
-| `-c`  | `--chunksize`         | Genomic positions per processing chunk.                        | `3000`   |
+| `-c`  | `--chunksize`         | Genomic positions per processing chunk (applied to standard loci). | `100000` |
+| —     | `--chunk-size-max-depth` | Chunk size used when `NEAR_MAX_DEPTH` is `true` in the TSV.       | `50`     |
 | —     | `--matrix-density`    | Hint for CSR buffer sizing.                                    | `0.005`  |
 | `-A`  | `--allcontigs`        | Include decoys and noncanonical contigs.                       | `false`  |
 
@@ -139,7 +142,7 @@ Important options:
 ## Performance Notes
 - **Reader pooling:** Each worker thread checks out an `IndexedReader` from a pool, avoiding reopen/seek penalties when iterating across genomic tiles.
 - **Triplet batching:** Sparse matrices are assembled from thread-local batches of `(row, col, value)` triplets, eliminating cross-thread contention.
-- **Adaptive chunking:** CLI `--chunksize` values govern the parallel granularity for both `ParGranges` (bulk) and `bam2mtx` chunk processors and double as the AnnData write batch size.
+- **Adaptive chunking:** Dual CLI knobs (`--chunksize` for standard loci and `--chunk-size-max-depth` for hotspots) govern the parallel granularity for `bam2mtx` (and the batch size for AnnData writes), while `ParGranges` continues to honour the regular `--chunksize` setting in `bulk`.
 - **Chunk-level fetch & depth guards:** `bam2mtx` batches contiguous sites per contig, records observed depth, and—in `--two-pass` mode—relies on the first-pass `bulk` run (honoring `--skip-max-depth`) to prune oversaturated loci before dense pileups reach the matrix stage.
 - **Progress-aware logging:** Chunk processors emit periodic `%` complete + ETA updates so multi-hour conversions remain easy to follow from the console.
 

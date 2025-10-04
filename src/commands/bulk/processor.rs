@@ -33,7 +33,7 @@ impl BaseProcessor {
         read_filter: Arc<DefaultReadFilter>,
         allowed_tids: Option<FxHashSet<u32>>,
     ) -> Self {
-        // Apply the logic: if skip_max_depth exists and is less than 2,000,000,000, 
+        // Apply the logic: if skip_max_depth exists and is less than 2,000,000,000,
         // then max_depth is set to skip_max_depth + 1000
         let adjusted_max_depth = if config.skip_max_depth < 2_000_000_000 {
             config.skip_max_depth + 1000
@@ -103,6 +103,7 @@ impl RegionProcessor for BaseProcessor {
                 self.min_baseq,
             );
             pos.pos += self.coord_base;
+            pos.mark_near_max_depth(self.max_depth);
 
             if pos.depth > self.skip_max_depth {
                 continue;
@@ -124,11 +125,11 @@ impl RegionProcessor for BaseProcessor {
                     count += 1;
                 }
 
-                ((pos.depth - pos.n) >= self.min_depth)
+                (pos.depth >= self.min_depth)
                     && (count >= 2)
                     && (pos.n <= max(pos.depth / self.max_n_fraction, 2))
             } else {
-                (pos.depth - pos.n) >= self.min_depth
+                pos.depth >= self.min_depth
             };
 
             if should_include {
