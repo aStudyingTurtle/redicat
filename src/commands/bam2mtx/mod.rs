@@ -62,6 +62,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     }
 
     let chunk_size = args.chunk_size();
+    let chunk_size_max_depth = args.chunk_size_max_depth();
     let adata_config = AnnDataConfig {
         stranded: args.stranded,
         compression: Some("gzip".to_string()),
@@ -84,7 +85,12 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
         cell_barcode_tag: args.cb_tag.clone(),
     };
 
-    let chunks = chunk_positions(positions, chunk_size);
+    info!(
+        "Chunking positions with chunk_size={} and chunk_size_max_depth={}",
+        chunk_size, chunk_size_max_depth
+    );
+
+    let chunks = chunk_positions(positions, chunk_size, chunk_size_max_depth);
     info!("Chunked positions into {} batches", chunks.len());
 
     let processor =
@@ -105,9 +111,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
                 let percent = (completed as f64 / total_chunks as f64) * 100.0;
                 info!(
                     "Processed {:.1}% ({} / {} chunks)",
-                    percent,
-                    completed,
-                    total_chunks
+                    percent, completed, total_chunks
                 );
             }
             acc.append(&mut data);

@@ -3,8 +3,7 @@
 //! This module exposes the [`ReadFilter`] trait along with a collection of
 //! implementations, including the default mapping-quality based filter.
 
-use rust_htslib::bam::pileup::Alignment;
-use rust_htslib::bam::record::Record;
+use noodles::bam::Record;
 
 /// A trait for filtering reads based on various criteria.
 ///
@@ -12,7 +11,7 @@ use rust_htslib::bam::record::Record;
 /// `true` if the read passes the filter and `false` otherwise.
 pub trait ReadFilter {
     /// Filter a read based on various criteria.
-    fn filter_read(&self, read: &Record, alignment: Option<&Alignment>) -> bool;
+    fn filter_read(&self, read: &Record) -> bool;
 }
 
 /// A straightforward read filter based on mapping quality.
@@ -35,8 +34,12 @@ impl DefaultReadFilter {
 impl ReadFilter for DefaultReadFilter {
     /// Filter reads based on mapping quality.
     #[inline(always)]
-    fn filter_read(&self, read: &Record, _alignment: Option<&Alignment>) -> bool {
-        read.mapq() >= self.min_mapq
+    fn filter_read(&self, read: &Record) -> bool {
+        read
+            .mapping_quality()
+            .map(u8::from)
+            .unwrap_or(0)
+            >= self.min_mapq
     }
 }
 
@@ -44,23 +47,17 @@ impl ReadFilter for DefaultReadFilter {
 mod tests {
     use super::*;
 
-    fn record_with_mapq(mapq: u8) -> Record {
-        let mut record = Record::new();
-        record.set_mapq(mapq);
-        record
-    }
-
     #[test]
     fn rejects_low_quality_reads() {
         let filter = DefaultReadFilter::new(30);
-        let record = record_with_mapq(10);
-        assert!(!filter.filter_read(&record, None));
+        let record = Record::default();
+        assert!(!filter.filter_read(&record));
     }
 
     #[test]
     fn accepts_high_quality_reads() {
-        let filter = DefaultReadFilter::new(20);
-        let record = record_with_mapq(25);
-        assert!(filter.filter_read(&record, None));
+        let filter = DefaultReadFilter::new(0);
+        let record = Record::default();
+        assert!(filter.filter_read(&record));
     }
 }

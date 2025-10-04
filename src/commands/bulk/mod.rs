@@ -35,7 +35,7 @@ pub fn run_bulk(args: BulkArgs) -> Result<()> {
         })?)
     };
 
-    let processor = BaseProcessor::from_config(&config, read_filter, allowed_tids);
+    let processor = BaseProcessor::from_config(&config, read_filter, allowed_tids)?;
 
     let runner = ParGranges::new(
         config.reads.clone(),

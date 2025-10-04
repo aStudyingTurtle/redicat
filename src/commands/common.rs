@@ -1,9 +1,8 @@
 use anyhow::{anyhow, Context, Result};
+use noodles::{bam, sam};
 use once_cell::sync::OnceCell;
 use rayon::ThreadPoolBuilder;
 use redicat_lib::utils;
-use rust_htslib::bam;
-use rust_htslib::bam::Read;
 use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
 
@@ -82,16 +81,19 @@ where
     P: AsRef<Path>,
     F: FnMut(&str) -> bool,
 {
-    let reader = bam::IndexedReader::from_path(reads.as_ref())
+    let mut reader = bam::io::indexed_reader::Builder::default()
+        .build_from_path(reads.as_ref())
         .with_context(|| format!("Failed to open {}", reads.as_ref().display()))?;
-    let header = reader.header().to_owned();
+    let header: sam::Header = reader
+        .read_header()
+        .with_context(|| format!("Failed to read header from {}", reads.as_ref().display()))?;
 
     let mut allowed = FxHashSet::default();
-    for tid in 0..header.target_count() {
-        let name = std::str::from_utf8(header.tid2name(tid))
+    for (tid, (name, _)) in header.reference_sequences().iter().enumerate() {
+        let contig = std::str::from_utf8(name.as_ref())
             .with_context(|| format!("Invalid contig name at TID {}", tid))?;
-        if predicate(name) {
-            allowed.insert(tid);
+        if predicate(contig) {
+            allowed.insert(tid as u32);
         }
     }
 

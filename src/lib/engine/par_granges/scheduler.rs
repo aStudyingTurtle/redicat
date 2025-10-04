@@ -1,9 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use crossbeam::channel::{bounded, Receiver};
 use log::*;
 use num_cpus;
 use rayon::prelude::*;
-use rust_htslib::bam::{IndexedReader, Read};
+use noodles::{bam, sam};
 use rust_lapper::Lapper;
 use std::{convert::TryInto, path::PathBuf, thread};
 
@@ -123,29 +123,33 @@ struct Engine<R: RegionProcessor + Send + Sync> {
 impl<R: RegionProcessor + Send + Sync> Engine<R> {
     fn run(self, sender: crossbeam::channel::Sender<R::P>) -> Result<()> {
         info!("Reading from {:?}", self.reads);
-        let mut reader = IndexedReader::from_path(&self.reads)
-            .with_context(|| format!("Failed to open BAM/CRAM {}", self.reads.display()))?;
-        if let Err(e) = reader.set_threads(self.threads) {
-            error!("Failed to set thread count to {}: {}", self.threads, e);
-        }
         if let Some(ref_fasta) = &self.ref_fasta {
-            reader
-                .set_reference(ref_fasta)
-                .with_context(|| format!("Failed to set reference {}", ref_fasta.display()))?;
+            warn!(
+                "Reference FASTA {:?} is currently ignored when using the noodles BAM reader",
+                ref_fasta
+            );
         }
-        let header = reader.header().to_owned();
-        let target_info: Vec<(u32, String)> = (0..header.target_count())
-            .map(|tid| {
-                let len = header
-                    .target_len(tid)
-                    .and_then(|len| len.try_into().ok())
-                    .unwrap_or(0);
-                let name = std::str::from_utf8(header.tid2name(tid))
-                    .unwrap_or("unknown")
-                    .to_string();
-                (len, name)
-            })
-            .collect();
+
+        let mut reader = bam::io::indexed_reader::Builder::default()
+            .build_from_path(&self.reads)
+            .with_context(|| format!("Failed to open indexed BAM {}", self.reads.display()))?;
+        let header: sam::Header = reader
+            .read_header()
+            .with_context(|| format!("Failed to read header from {}", self.reads.display()))?;
+        drop(reader);
+
+        let reference_sequences = header.reference_sequences();
+        let mut target_info = Vec::with_capacity(reference_sequences.len());
+        for (tid, (name, sequence)) in reference_sequences.iter().enumerate() {
+            let len = sequence
+                .length()
+                .get()
+                .try_into()
+                .map_err(|_| anyhow!("Target length overflow for TID {}", tid))?;
+
+            let contig = String::from_utf8_lossy(name.as_ref()).into_owned();
+            target_info.push((len, contig));
+        }
 
         let bed_intervals = match &self.regions_bed {
             Some(path) => Some(intervals::bed_to_intervals(
@@ -272,14 +276,20 @@ mod tests {
     use super::*;
     use bio::io::bed;
     use proptest::prelude::*;
-    use rust_htslib::{bam, bcf};
     use rust_lapper::{Interval, Lapper};
     use smartstring::SmartString;
     use std::collections::{HashMap, HashSet};
+    use std::convert::TryFrom;
+    use std::fs::File;
+    use std::num::NonZeroUsize;
     use tempfile::tempdir;
 
     use crate::engine::position::pileup_position::PileupPosition;
-    use crate::engine::position::Position;
+    use noodles::bam::bai;
+    use noodles::{bcf, csi, core::Position, vcf};
+    use csi::binning_index::index::{reference_sequence::index::LinearIndex, ReferenceSequence as BinningReferenceSequence};
+    use vcf::header::record::value::{map::Contig as VcfContig, Map as VcfMap};
+    use vcf::variant::io::Write as _;
 
     struct TestProcessor;
 
@@ -290,7 +300,7 @@ mod tests {
             (start..stop)
                 .map(|pos| {
                     let chr = SmartString::from(&tid.to_string());
-                    PileupPosition::new(chr, pos)
+                    PileupPosition::create(chr, pos)
                 })
                 .collect()
         }
@@ -343,16 +353,37 @@ mod tests {
             let bed_path = tempdir.path().join("test.bed");
             let vcf_path = tempdir.path().join("test.vcf");
 
-            let mut header = bam::header::Header::new();
+            let mut header_builder = sam::Header::builder();
             for (i, chr) in chromosomes.iter().enumerate() {
-                let mut chr_rec = bam::header::HeaderRecord::new(b"SQ");
-                chr_rec.push_tag(b"SN", &i.to_string());
-                chr_rec.push_tag(b"LN", &chr.2.to_string());
-                header.push_record(&chr_rec);
+                let raw_len = std::cmp::max(chr.2, 1) as usize;
+                let length = NonZeroUsize::new(raw_len).unwrap();
+                let reference_sequence = sam::header::record::value::Map::<sam::header::record::value::map::ReferenceSequence>::new(length);
+                header_builder = header_builder.add_reference_sequence(i.to_string(), reference_sequence);
             }
-            let writer = bam::Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
-            drop(writer);
-            bam::index::build(&bam_path, None, bam::index::Type::Bai, 1).unwrap();
+            let header = header_builder.build();
+
+            {
+                let mut writer = bam::io::Writer::new(File::create(&bam_path).unwrap());
+                writer.write_header(&header).unwrap();
+                writer.try_finish().unwrap();
+            }
+
+            let reference_sequences = header.reference_sequences().len();
+            let bai_path = bam_path.with_extension("bam.bai");
+            let reference_sequences: Vec<_> = (0..reference_sequences)
+                .map(|_| {
+                    BinningReferenceSequence::new(
+                        Default::default(),
+                        LinearIndex::default(),
+                        None,
+                    )
+                })
+                .collect();
+            let index = bai::Index::builder()
+                .set_reference_sequences(reference_sequences)
+                .build();
+            let mut bai_writer = bai::io::Writer::new(File::create(&bai_path).unwrap());
+            bai_writer.write_index(&index).unwrap();
 
             let mut bed_writer = bed::Writer::to_file(&bed_path).unwrap();
             for (i, chr) in chromosomes.iter().enumerate() {
@@ -368,27 +399,38 @@ mod tests {
             drop(bed_writer);
 
             let mut vcf_truth = HashMap::new();
-            let mut vcf_header = bcf::header::Header::new();
+            let mut vcf_header_builder = vcf::Header::builder();
             for (i, chr) in chromosomes.iter().enumerate() {
-                vcf_header.push_record(
-                    format!("##contig=<ID={},length={}>", i, chr.2).as_bytes(),
-                );
+                let raw_len = std::cmp::max(chr.2, 1) as usize;
+                let contig = VcfMap::<VcfContig>::builder()
+                    .set_length(raw_len)
+                    .build()
+                    .unwrap();
+                vcf_header_builder = vcf_header_builder.add_contig(i.to_string(), contig);
             }
-            let mut vcf_writer = bcf::Writer::from_path(&vcf_path, &vcf_header, true, bcf::Format::Vcf).unwrap();
-            let mut record = vcf_writer.empty_record();
+            let vcf_header = vcf_header_builder.build();
+            let mut vcf_writer = bcf::io::Writer::new(File::create(&vcf_path).unwrap());
+            vcf_writer.write_header(&vcf_header).unwrap();
             for (i, chr) in chromosomes.iter().enumerate() {
-                record.set_rid(Some(i as u32));
+                let chrom_id = i.to_string();
                 let counter = vcf_truth.entry(i).or_insert(0);
                 let mut seen = HashSet::new();
                 for iv in chr.0.iter() {
                     if seen.insert(iv.start) {
                         *counter += 1;
                     }
-                    record.set_pos(iv.start as i64);
-                    vcf_writer.write(&record).unwrap();
+                    let position = Position::try_from((iv.start + 1) as usize).unwrap();
+                    let record = vcf::variant::RecordBuf::builder()
+                        .set_reference_sequence_name(chrom_id.clone())
+                        .set_variant_start(position)
+                        .set_reference_bases("N")
+                        .build();
+                    vcf_writer
+                        .write_variant_record(&vcf_header, &record)
+                        .unwrap();
                 }
             }
-            drop(vcf_writer);
+            vcf_writer.try_finish().unwrap();
 
             let par_granges_runner = ParGranges::new(
                 bam_path,

@@ -1,11 +1,21 @@
 //! BAM file processing for single-cell data
 
 use std::collections::HashMap;
+use std::convert::{TryFrom, TryInto};
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
-use rust_htslib::bam::{self, pileup::Alignment, record::Record, Read};
+use anyhow::{anyhow, Context, Result};
+use noodles::{
+    bam,
+    core::{self, Position, Region},
+    sam,
+};
+use noodles::bam::Record;
+use noodles::sam::alignment::record::cigar::op::Kind;
+use noodles::sam::alignment::record::data::field::Value;
+use noodles::sam::alignment::record::data::field::value::Array;
 use rustc_hash::FxHashMap;
 
 use crate::pipeline::bam2mtx::barcode::BarcodeProcessor;
@@ -57,43 +67,64 @@ fn clean_tag_value(raw: &str) -> Option<String> {
 
 /// Extract and normalize a cell barcode from the requested BAM tag.
 pub fn decode_cell_barcode(record: &Record, tag: &[u8]) -> Result<Option<String>> {
-    match record.aux(tag) {
-        Ok(bam::record::Aux::String(s)) => Ok(clean_tag_value(s)),
-        Ok(bam::record::Aux::ArrayU8(arr)) => {
-            let bytes: Vec<u8> = arr.iter().collect();
-            let raw = std::str::from_utf8(&bytes)?;
+    let tag: [u8; 2] = tag
+        .try_into()
+        .map_err(|_| anyhow!("Tag must be 2 bytes long"))?;
+
+    match record.data().get(&tag) {
+        Some(Ok(Value::String(value))) => {
+            let raw = std::str::from_utf8(value.as_ref())?;
             Ok(clean_tag_value(raw))
         }
-        Ok(_) => Ok(None),
-        Err(_) => Ok(None),
+        Some(Ok(Value::Array(array))) => match array {
+            Array::UInt8(values) => {
+                let bytes: Vec<u8> = values.iter().collect::<io::Result<Vec<_>>>()?;
+                let raw = std::str::from_utf8(&bytes)?;
+                Ok(clean_tag_value(raw))
+            }
+            _ => Ok(None),
+        },
+        Some(Ok(_)) => Ok(None),
+        Some(Err(_)) | None => Ok(None),
     }
 }
 
 /// Extract and normalize a UMI from the requested BAM tag.
 pub fn decode_umi(record: &Record, tag: &[u8]) -> Result<Option<String>> {
-    match record.aux(tag) {
-        Ok(bam::record::Aux::String(s)) => Ok(clean_tag_value(s)),
-        Ok(bam::record::Aux::ArrayU8(arr)) => {
-            let bytes: Vec<u8> = arr.iter().collect();
-            let raw = std::str::from_utf8(&bytes)?;
+    let tag: [u8; 2] = tag
+        .try_into()
+        .map_err(|_| anyhow!("Tag must be 2 bytes long"))?;
+
+    match record.data().get(&tag) {
+        Some(Ok(Value::String(value))) => {
+            let raw = std::str::from_utf8(value.as_ref())?;
             Ok(clean_tag_value(raw))
         }
-        Ok(_) => Ok(None),
-        Err(_) => Ok(None),
+        Some(Ok(Value::Array(array))) => match array {
+            Array::UInt8(values) => {
+                let bytes: Vec<u8> = values.iter().collect::<io::Result<Vec<_>>>()?;
+                let raw = std::str::from_utf8(&bytes)?;
+                Ok(clean_tag_value(raw))
+            }
+            _ => Ok(None),
+        },
+        Some(Ok(_)) => Ok(None),
+        Some(Err(_)) | None => Ok(None),
     }
 }
 
 /// Retrieve the canonical base at the requested query position.
-pub fn decode_base(record: &Record, qpos: Option<usize>) -> Result<char> {
-    let qpos = qpos.ok_or_else(|| anyhow!("Invalid query position"))?;
-    let seq = record.seq();
-    let base = seq.as_bytes()[qpos];
+pub fn decode_base(record: &Record, qpos: usize) -> Result<char> {
+    let base = record
+        .sequence()
+        .get(qpos)
+        .ok_or_else(|| anyhow!("Invalid query position"))?;
 
-    Ok(match base {
-        b'A' | b'a' => 'A',
-        b'T' | b't' => 'T',
-        b'G' | b'g' => 'G',
-        b'C' | b'c' => 'C',
+    Ok(match base.to_ascii_uppercase() {
+        b'A' => 'A',
+        b'T' => 'T',
+        b'G' => 'G',
+        b'C' => 'C',
         _ => 'N',
     })
 }
@@ -143,6 +174,49 @@ pub fn apply_encoded_call(stranded: bool, code: u8, counts_entry: &mut StrandBas
             _ => {}
         }
     }
+}
+
+fn query_offset_at(record: &Record, target_ref: i64) -> Option<usize> {
+    let start = record.alignment_start().transpose().ok().flatten()?;
+    let mut ref_pos = usize::from(start) as i64 - 1;
+    let mut read_pos = 0usize;
+
+    for op_result in record.cigar().iter() {
+        let op = match op_result {
+            Ok(op) => op,
+            Err(_) => return None,
+        };
+
+        let len = op.len() as usize;
+
+        match op.kind() {
+            Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch => {
+                let span_end = ref_pos + len as i64;
+                if target_ref >= ref_pos && target_ref < span_end {
+                    let offset = (target_ref - ref_pos) as usize;
+                    return Some(read_pos + offset);
+                }
+                ref_pos = span_end;
+                read_pos += len;
+            }
+            Kind::Insertion => {
+                read_pos += len;
+            }
+            Kind::Deletion | Kind::Skip => {
+                let span_end = ref_pos + len as i64;
+                if target_ref >= ref_pos && target_ref < span_end {
+                    return None;
+                }
+                ref_pos = span_end;
+            }
+            Kind::SoftClip => {
+                read_pos += len;
+            }
+            Kind::HardClip | Kind::Pad => {}
+        }
+    }
+
+    None
 }
 
 /// Configuration for BAM processing
@@ -206,85 +280,122 @@ impl BamProcessor {
 
     /// Process a single genomic position
     pub fn process_position(&self, bam_path: &Path, chrom: &str, pos: u64) -> Result<PositionData> {
-        let mut reader = bam::IndexedReader::from_path(bam_path)?;
+        if pos == 0 {
+            return Err(anyhow!("Positions must be 1-based"));
+        }
 
-        // Convert to 0-based position for rust-htslib
-        let start_pos = (pos - 1) as u32;
-        let end_pos = pos as u32;
+        let mut reader = bam::io::indexed_reader::Builder::default()
+            .build_from_path(bam_path)
+            .with_context(|| format!("Failed to open {}", bam_path.display()))?;
+        let header: sam::Header = reader
+            .read_header()
+            .context("Failed to read BAM header")?;
 
-        // Get chromosome ID
-        let header = reader.header().to_owned();
-        let tid = header
-            .tid(chrom.as_bytes())
-            .ok_or_else(|| anyhow::anyhow!("Chromosome '{}' not found", chrom))?;
+        let reference_sequences = header.reference_sequences();
+        let tid = reference_sequences
+            .get_index_of(chrom.as_bytes())
+            .ok_or_else(|| anyhow!("Chromosome '{}' not found", chrom))?;
 
-        // Fetch the region
-        reader.fetch((tid, start_pos, end_pos))?;
-        let mut pileups: bam::pileup::Pileups<'_, bam::IndexedReader> = reader.pileup();
-        pileups.set_max_depth(i32::MAX as u32);
+        let position = Position::try_from(pos as usize)
+            .map_err(|_| anyhow!("Invalid genomic coordinate {}", pos))?;
+        let interval = core::region::Interval::from(position..=position);
+        let region = Region::new(chrom.to_string(), interval);
+
+        let mut query = reader
+            .query(&header, &region)
+            .with_context(|| format!("Failed to query region {}:{}", chrom, pos))?;
+
+        let target_ref = (pos - 1) as i64;
         let mut counts: FxHashMap<String, StrandBaseCounts> = FxHashMap::default();
         let mut umi_consensus: FxHashMap<(String, String), u8> = FxHashMap::default();
+        let mut processed = 0u32;
 
-        // Process pileup
-        for pileup in pileups {
-            let pileup = pileup?;
-            if pileup.pos() != start_pos {
+        while let Some(record_result) = query.next() {
+            let record = record_result?;
+
+            if record.flags().is_unmapped() {
                 continue;
             }
 
-            // let mut processed = 0u32;
+            let read_tid = match record.reference_sequence_id().transpose()? {
+                Some(id) => id,
+                None => continue,
+            };
 
-            for read in pileup.alignments() {
-                if !self.should_process_read(&read) {
-                    continue;
-                }
+            if read_tid != tid {
+                continue;
+            }
 
-                // processed = processed.saturating_add(1);
-                // if processed > self.config.max_depth {
-                //     break;
-                // }
+            let mapq = record.mapping_quality().map(u8::from).unwrap_or(0);
+            if mapq < self.config.min_mapping_quality {
+                continue;
+            }
 
-                let record = read.record();
-                let cell_barcode =
-                    match decode_cell_barcode(&record, self.config.cell_barcode_tag.as_bytes())? {
-                        Some(barcode) => barcode,
-                        None => continue,
-                    };
+            let Some(qpos) = query_offset_at(&record, target_ref) else {
+                continue;
+            };
 
-                if !self.barcode_processor.is_valid(&cell_barcode) {
-                    continue;
-                }
+            let base_qual = record
+                .quality_scores()
+                .as_ref()
+                .get(qpos)
+                .copied()
+                .unwrap_or(0);
+            if base_qual < self.config.min_base_quality {
+                continue;
+            }
 
-                let umi = match decode_umi(&record, self.config.umi_tag.as_bytes())? {
-                    Some(umi) => umi,
-                    None => continue,
-                };
+            let base = decode_base(&record, qpos)?;
+            if base == 'N' {
+                continue;
+            }
 
-                let base = decode_base(&record, read.qpos())?;
-                if let Some(encoded) = encode_call(self.config.stranded, base, record.is_reverse())
-                {
-                    umi_consensus
-                        .entry((cell_barcode, umi))
-                        .and_modify(|existing| {
-                            if *existing != encoded {
-                                *existing = UMI_CONFLICT_CODE;
-                            }
-                        })
-                        .or_insert(encoded);
-                }
+            let cell_barcode = match decode_cell_barcode(&record, self.config.cell_barcode_tag.as_bytes())? {
+                Some(barcode) => barcode,
+                None => continue,
+            };
+
+            if !self.barcode_processor.is_valid(&cell_barcode) {
+                continue;
+            }
+
+            let umi = match decode_umi(&record, self.config.umi_tag.as_bytes())? {
+                Some(umi) => umi,
+                None => continue,
+            };
+
+            let encoded = match encode_call(
+                self.config.stranded,
+                base,
+                record.flags().is_reverse_complemented(),
+            ) {
+                Some(value) => value,
+                None => continue,
+            };
+
+            umi_consensus
+                .entry((cell_barcode, umi))
+                .and_modify(|existing| {
+                    if *existing != encoded {
+                        *existing = UMI_CONFLICT_CODE;
+                    }
+                })
+                .or_insert(encoded);
+
+            processed = processed.saturating_add(1);
+            if processed >= self.config.max_depth {
+                break;
             }
         }
 
-        // Aggregate counts by cell barcode
-        let mut position_counts = HashMap::with_capacity(counts.len());
+        let mut position_counts = HashMap::new();
         for ((cell_barcode, _umi), encoded) in umi_consensus.drain() {
             if encoded == UMI_CONFLICT_CODE {
                 continue;
             }
 
-            let counts_entry = counts.entry(cell_barcode).or_default();
-
-            apply_encoded_call(self.config.stranded, encoded, counts_entry);
+            let entry = counts.entry(cell_barcode).or_default();
+            apply_encoded_call(self.config.stranded, encoded, entry);
         }
 
         for (barcode, strand_counts) in counts.drain() {
@@ -296,30 +407,5 @@ impl BamProcessor {
             pos,
             counts: position_counts,
         })
-    }
-
-    /// Check if a read should be processed
-    fn should_process_read(&self, read: &Alignment) -> bool {
-        if read.is_del() || read.is_refskip() {
-            return false;
-        }
-
-        let record = read.record();
-
-        // Check mapping quality
-        if record.mapq() < self.config.min_mapping_quality {
-            return false;
-        }
-
-        // Check base quality
-        if let Some(qpos) = read.qpos() {
-            if let Some(qual) = record.qual().get(qpos) {
-                if *qual < self.config.min_base_quality {
-                    return false;
-                }
-            }
-        }
-
-        true
     }
 }

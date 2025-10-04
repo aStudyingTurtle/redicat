@@ -63,7 +63,6 @@ lru_time_cache = "0.11.11"
 ndarray = "0.15.6"
 num_cpus = "1.17.0"
 rayon = "1.10.0"
-rust-htslib = { version = "0.50.0" }
 rust-lapper = "1.2"
 parking_lot = "0.12.1"
 serde = { version = "1.0.219", features = ["derive"] }
@@ -81,6 +80,7 @@ polars-arrow = "0.45.1"
 rustc-hash = "2.1.1"
 smallvec = "1.15.1"
 once_cell = "1.19.0"
+noodles = { version = "0.101.0", features = ["bam", "sam", "core", "bgzf", "csi", "bcf", "vcf"] }
 
 [dev-dependencies]
 assert_approx_eq = "1.1.0"
