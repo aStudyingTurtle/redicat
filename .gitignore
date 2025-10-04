@@ -2,3 +2,7 @@
 /test
 project_info.md
 project.md
+test/**
+chr22.tsv.gz
+perf.data*
+flamegraph.svg
