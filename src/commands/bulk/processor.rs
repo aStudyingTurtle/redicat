@@ -33,10 +33,18 @@ impl BaseProcessor {
         read_filter: Arc<DefaultReadFilter>,
         allowed_tids: Option<FxHashSet<u32>>,
     ) -> Self {
+        // Apply the logic: if skip_max_depth exists and is less than 2,000,000,000, 
+        // then max_depth is set to skip_max_depth + 1000
+        let adjusted_max_depth = if config.skip_max_depth < 2_000_000_000 {
+            config.skip_max_depth + 1000
+        } else {
+            config.max_depth
+        };
+
         Self {
             reads: config.reads.clone(),
             coord_base: config.coord_offset,
-            max_depth: config.max_depth,
+            max_depth: adjusted_max_depth,
             skip_max_depth: config.skip_max_depth,
             min_depth: config.min_depth,
             max_n_fraction: config.max_n_fraction,

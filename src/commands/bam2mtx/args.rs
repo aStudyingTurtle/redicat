@@ -53,8 +53,15 @@ pub struct Bam2MtxArgs {
     #[structopt(long, short = "S")]
     pub stranded: bool,
 
-    /// Maximum pileup depth to examine per site.
-    #[structopt(long = "max-depth", default_value = "2147483647", short = "D")]
+    // /// Maximum pileup depth to examine per site.
+    // #[structopt(long = "max-depth", default_value = "2147483647", short = "D")]
+    // pub max_depth: u32,
+    #[structopt(
+        long = "max-depth",
+        default_value = "2147483647",
+        short = "D",
+        hidden = true
+    )]
     pub max_depth: u32,
 
     /// Skip sites whose observed depth exceeds this threshold when generating first-pass sites (`--two-pass`).

@@ -70,7 +70,7 @@ Add `--allcontigs` to any command that should consider every contig in the BAM h
 
 ## Subcommands
 ### `bulk`
-Calculates per-base depth and nucleotide counts across a BAM/CRAM. Filtering options allow you to tune MAPQ, base quality, minimum depth, and an editing-specific heuristic. Results stream to a bgzip-compressed TSV.
+Calculates per-base depth and nucleotide counts across a BAM/CRAM. Filtering options allow you to tune MAPQ, base quality, minimum depth, and an editing-specific heuristic. When `--skip-max-depth` is set to a value less than 2,000,000,000, the `--max-depth` value is automatically adjusted to `--skip-max-depth + 1000`. Results stream to a bgzip-compressed TSV.
 Some libraries of `bulk` were taken form the [`perbase`](https://github.com/sstadick/perbase) project.
 
 Option reference:
@@ -84,7 +84,7 @@ Option reference:
 | `-Q`  | `--min-baseq`         | Base-quality floor; lower bases counted as `N`.       | `30 (implicit)` |
 | `-q`  | `--mapquality`        | Minimum mapping quality accepted.                     | `255`           |
 | `-z`  | `--zero-base`         | Emit 0-based coordinates instead of 1-based.          | `false`         |
-| `-D`  | `--max-depth`         | Depth ceiling; near-max flagged as suspect.           | `8000`          |
+| `-D`  | `--max-depth`         | Depth ceiling; near-max flagged as suspect. When `--skip-max-depth` is set to a value less than 2,000,000,000, this value is automatically set to `--skip-max-depth + 1000`. | `8000`          |
 | `-s`/`-sD` | `--skip-max-depth`    | Skip sites whose observed depth exceeds this limit.    | `2147483647`    |
 | `-d`  | `--min-depth`         | Minimum coverage required to report a site.           | `10`            |
 | `-n`  | `--max-n-fraction`    | Maximum tolerated N fraction (depth / value).         | `20`            |
