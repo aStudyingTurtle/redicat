@@ -6,10 +6,10 @@ pub const BYTES_IN_A_GIGABYTE: usize = 1024 * 1024 * 1024;
 
 /// A modifier applied to the channel size formula: `(BYTES_IN_A_GIGABYTE * modifier) * threads / size_of(R::P)`.
 /// A value of 0.5 corresponds to roughly 1_000_000 `PileupPosition` objects per worker with room to spare.
-pub const CHANNEL_SIZE_MODIFIER: f64 = 0.5;
+pub const CHANNEL_SIZE_MODIFIER: f64 = 0.25;
 
 /// Ideal number of basepairs each worker receives. Total bp in memory at one time ≈ `threads * chunksize`.
-pub const CHUNKSIZE: u32 = 500_000;
+pub const CHUNKSIZE: u32 = 300_000;
 
 lazy_static! {
     /// [`CHANNEL_SIZE_MODIFIER`] as a string.

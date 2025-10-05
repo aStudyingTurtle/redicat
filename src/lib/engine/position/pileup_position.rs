@@ -155,11 +155,10 @@ impl PileupPosition {
             return;
         }
 
-        let max_depth_u32 = u32::from(max_depth);
-        let tolerance = (max_depth_u32 + 99) / 100;
+        let tolerance = ((max_depth as u64) + 99) / 100;
+        let threshold = max_depth.saturating_sub(tolerance as u32);
 
-        self.near_max_depth =
-            max_depth_u32.saturating_sub(self.depth) <= tolerance;
+        self.near_max_depth = self.depth >= threshold;
     }
 
     /// Convert a pileup into a `Position`.
@@ -210,24 +209,22 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn mark_near_max_depth_accounts_for_failures() {
+    fn mark_near_max_depth_uses_observed_depth() {
         let mut position = PileupPosition {
-            depth: 98_500,
+            depth: 99_200,
             fail: 900,
             ..Default::default()
         };
 
         position.mark_near_max_depth(100_000);
-        assert!(!position.near_max_depth);
+        assert!(position.near_max_depth);
 
-        position.depth = 80_000;
-        position.fail = 0;
+        position.depth = 98_500;
         position.near_max_depth = true;
         position.mark_near_max_depth(100_000);
         assert!(!position.near_max_depth);
 
         position.depth = 10;
-        position.fail = 0;
         position.mark_near_max_depth(0);
         assert!(!position.near_max_depth);
     }

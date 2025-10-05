@@ -236,14 +236,13 @@ impl<R: RegionProcessor + Send + Sync> Engine<R> {
                         continue;
                     }
 
-                    let completed = processed_chunks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let completed =
+                        processed_chunks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     if completed == total_chunks as usize || completed % log_step == 0 {
                         let percent = (completed as f64 / total_chunks as f64) * 100.0;
                         info!(
                             "Processed {:.1}% ({} / {} chunks)",
-                            percent,
-                            completed,
-                            total_chunks
+                            percent, completed, total_chunks
                         );
                     }
 

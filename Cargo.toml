@@ -1,6 +1,6 @@
 [package]
 name = "redicat"
-version = "0.2.1"
+version = "0.3.0"
 authors = ["Li Jiaxuan <lijiaxuanchn@outlook.com>"]
 edition = "2018"
 license = "MIT"

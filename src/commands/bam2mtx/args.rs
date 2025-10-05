@@ -90,7 +90,7 @@ pub struct Bam2MtxArgs {
     pub chunksize: u32,
 
     /// Chunk size applied to high-depth loci marked by `NEAR_MAX_DEPTH` in the TSV.
-    #[structopt(long = "chunk-size-max-depth", default_value = "50")]
+    #[structopt(long = "chunk-size-max-depth", default_value = "30")]
     pub chunk_size_max_depth: u32,
 
     /// Matrix density estimate used to pre-size sparse buffers.
@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(args.barcodes, PathBuf::from("barcodes.tsv"));
         assert_eq!(args.output, PathBuf::from("output.h5ad"));
         assert_eq!(args.skip_max_depth, i32::MAX as u32);
-        assert_eq!(args.chunk_size_max_depth, 50);
+        assert_eq!(args.chunk_size_max_depth, 30);
         assert!(!args.two_pass);
     }
 }
