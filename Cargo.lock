@@ -998,7 +998,6 @@ dependencies = [
  "crc32fast",
  "libz-ng-sys",
  "libz-rs-sys",
- "libz-sys",
  "miniz_oxide",
 ]
 
@@ -1221,8 +1220,6 @@ dependencies = [
  "core_affinity",
  "flate2",
  "flume",
- "libdeflater",
- "libz-sys",
  "num_cpus",
  "thiserror 1.0.69",
 ]
@@ -1585,24 +1582,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1171693293099992e19cddea4e8b849964e9846f4acee11b3948bcc337be8776"
 
 [[package]]
-name = "libdeflate-sys"
-version = "0.7.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cceaf6e335d658ec0602685bfe50d0f35248d6d8848b194058bfda37a9eb728"
-dependencies = [
- "cc",
-]
-
-[[package]]
-name = "libdeflater"
-version = "0.7.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15f0c115fd181333eb7a82cf42e2ce2d9fac0ad06babd3ab79a9ec5bd66352fe"
-dependencies = [
- "libdeflate-sys",
-]
-
-[[package]]
 name = "libloading"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1644,7 +1623,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b70e7a7df205e92a1a4cd9aaae7898dac0aa555503cc0a649494d0d60e7651d"
 dependencies = [
  "cc",
- "cmake",
  "libc",
  "pkg-config",
  "vcpkg",

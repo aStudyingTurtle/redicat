@@ -53,9 +53,9 @@ crossbeam = "0.8"
 crossbeam-channel = "0.5"
 csv = "1.3.1"
 env_logger = "0.9.3"
-flate2 = "1.0.30"
+flate2 = { version = "1.1.2", default-features = false, features = ["rust_backend"] }
 grep-cli = "0.1.11"
-gzp = "0.10"
+gzp = { version = "0.10", default-features = false, features = ["deflate_rust"] }
 itertools = "0.10.5"
 lazy_static = "1.5.0"
 log = "0.4.27"
@@ -89,5 +89,3 @@ proptest = "1.7.0"
 rstest = "0.11.0"
 tempfile = "3.20.0"
 
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-feature=+crt-static"]
