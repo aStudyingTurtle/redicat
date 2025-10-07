@@ -12,6 +12,10 @@ pub struct GenomicPosition {
     pub chrom: String,
     pub pos: u64,
     pub depth: u32,
+    pub ins: u32,
+    pub del: u32,
+    pub ref_skip: u32,
+    pub fail: u32,
     pub near_max_depth: bool,
 }
 
@@ -93,6 +97,46 @@ pub fn read_positions<P: AsRef<Path>>(tsv_path: P) -> Result<Vec<GenomicPosition
         .u32()
         .context("DEPTH column must be unsigned integer")?;
 
+    let ins_series_owned = dataframe
+        .column("INS")
+        .context("positions file is missing INS column")?
+        .cast(&DataType::UInt32)
+        .context("unable to cast INS to UInt32")?
+        .clone();
+    let ins_series = ins_series_owned
+        .u32()
+        .context("INS column must be unsigned integer")?;
+
+    let del_series_owned = dataframe
+        .column("DEL")
+        .context("positions file is missing DEL column")?
+        .cast(&DataType::UInt32)
+        .context("unable to cast DEL to UInt32")?
+        .clone();
+    let del_series = del_series_owned
+        .u32()
+        .context("DEL column must be unsigned integer")?;
+
+    let ref_skip_series_owned = dataframe
+        .column("REF_SKIP")
+        .context("positions file is missing REF_SKIP column")?
+        .cast(&DataType::UInt32)
+        .context("unable to cast REF_SKIP to UInt32")?
+        .clone();
+    let ref_skip_series = ref_skip_series_owned
+        .u32()
+        .context("REF_SKIP column must be unsigned integer")?;
+
+    let fail_series_owned = dataframe
+        .column("FAIL")
+        .context("positions file is missing FAIL column")?
+        .cast(&DataType::UInt32)
+        .context("unable to cast FAIL to UInt32")?
+        .clone();
+    let fail_series = fail_series_owned
+        .u32()
+        .context("FAIL column must be unsigned integer")?;
+
     let near_series_owned = dataframe
         .column("NEAR_MAX_DEPTH")
         .context("positions file is missing NEAR_MAX_DEPTH column")?
@@ -115,12 +159,28 @@ pub fn read_positions<P: AsRef<Path>>(tsv_path: P) -> Result<Vec<GenomicPosition
         let Some(depth) = depth_series.get(idx) else {
             continue;
         };
+        let Some(ins) = ins_series.get(idx) else {
+            continue;
+        };
+        let Some(del) = del_series.get(idx) else {
+            continue;
+        };
+        let Some(ref_skip) = ref_skip_series.get(idx) else {
+            continue;
+        };
+        let Some(fail) = fail_series.get(idx) else {
+            continue;
+        };
         let near = near_series.get(idx).unwrap_or(false);
 
         positions.push(GenomicPosition {
             chrom: chrom.to_string(),
             pos,
             depth,
+            ins,
+            del,
+            ref_skip,
+            fail,
             near_max_depth: near,
         });
     }
@@ -174,7 +234,7 @@ pub fn chunk_positions(
         *chrom = None;
     };
 
-    for mut position in positions.into_iter() {
+    for position in positions.into_iter() {
         let position_kind = if position.near_max_depth {
             ChunkKind::NearMax
         } else {
@@ -199,20 +259,23 @@ pub fn chunk_positions(
             current_chrom = Some(position.chrom.clone());
         }
 
-        if current_kind == ChunkKind::Normal && position.depth == 0 {
-            position.depth = 1;
-        }
-
-        let increment = match current_kind {
-            ChunkKind::Normal => usize::max(position.depth as usize, 1),
-            ChunkKind::NearMax => 1,
+        // Calculate the weight for this position: DEPTH + INS + DEL + REF_SKIP + FAIL
+        let position_weight = if current_kind == ChunkKind::Normal {
+            (position.depth as usize)
+                .saturating_add(position.ins as usize)
+                .saturating_add(position.del as usize)
+                .saturating_add(position.ref_skip as usize)
+                .saturating_add(position.fail as usize)
+                .max(1)
+        } else {
+            1
         };
 
         current_chunk.push(position);
 
         match current_kind {
             ChunkKind::Normal => {
-                current_weight = current_weight.saturating_add(increment);
+                current_weight = current_weight.saturating_add(position_weight);
                 if current_weight >= normal_limit {
                     flush_current(
                         &mut chunks,
@@ -270,42 +333,70 @@ mod tests {
                 chrom: "chr1".to_string(),
                 pos: 1,
                 depth: 2,
+                ins: 0,
+                del: 0,
+                ref_skip: 0,
+                fail: 0,
                 near_max_depth: false,
             },
             GenomicPosition {
                 chrom: "chr1".to_string(),
                 pos: 2,
                 depth: 2,
+                ins: 0,
+                del: 0,
+                ref_skip: 0,
+                fail: 0,
                 near_max_depth: false,
             },
             GenomicPosition {
                 chrom: "chr1".to_string(),
                 pos: 3,
                 depth: 120,
+                ins: 5,
+                del: 3,
+                ref_skip: 2,
+                fail: 1,
                 near_max_depth: true,
             },
             GenomicPosition {
                 chrom: "chr1".to_string(),
                 pos: 4,
                 depth: 95,
+                ins: 4,
+                del: 2,
+                ref_skip: 1,
+                fail: 2,
                 near_max_depth: true,
             },
             GenomicPosition {
                 chrom: "chr1".to_string(),
                 pos: 5,
                 depth: 88,
+                ins: 3,
+                del: 1,
+                ref_skip: 0,
+                fail: 1,
                 near_max_depth: true,
             },
             GenomicPosition {
                 chrom: "chr1".to_string(),
                 pos: 6,
                 depth: 1,
+                ins: 0,
+                del: 0,
+                ref_skip: 0,
+                fail: 0,
                 near_max_depth: false,
             },
             GenomicPosition {
                 chrom: "chr1".to_string(),
                 pos: 7,
                 depth: 2,
+                ins: 0,
+                del: 0,
+                ref_skip: 0,
+                fail: 0,
                 near_max_depth: false,
             },
         ];
@@ -320,7 +411,11 @@ mod tests {
                     .iter()
                     .all(|position| position.near_max_depth));
             } else {
-                let total_weight: usize = chunk.positions.iter().map(|p| p.depth as usize).sum();
+                let total_weight: usize = chunk
+                    .positions
+                    .iter()
+                    .map(|p| (p.depth + p.ins + p.del + p.ref_skip + p.fail) as usize)
+                    .sum();
                 assert!(total_weight <= 4);
             }
         }
@@ -333,36 +428,125 @@ mod tests {
                 chrom: "chr2".to_string(),
                 pos: 10,
                 depth: 5,
+                ins: 1,
+                del: 0,
+                ref_skip: 0,
+                fail: 0,
                 near_max_depth: false,
             },
             GenomicPosition {
                 chrom: "chr2".to_string(),
                 pos: 11,
                 depth: 3,
+                ins: 0,
+                del: 1,
+                ref_skip: 0,
+                fail: 0,
                 near_max_depth: false,
             },
             GenomicPosition {
                 chrom: "chr2".to_string(),
                 pos: 12,
                 depth: 4,
+                ins: 0,
+                del: 0,
+                ref_skip: 1,
+                fail: 0,
                 near_max_depth: false,
             },
             GenomicPosition {
                 chrom: "chr2".to_string(),
                 pos: 13,
                 depth: 6,
+                ins: 0,
+                del: 0,
+                ref_skip: 0,
+                fail: 1,
                 near_max_depth: false,
             },
         ];
 
         let chunks = chunk_positions(positions, 10, 2);
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].positions.len(), 3);
-        assert_eq!(chunks[1].positions.len(), 1);
+        assert_eq!(chunks[0].positions.len(), 2); // First two positions: weight 6 + 4 = 10
+        assert_eq!(chunks[1].positions.len(), 2); // Last two positions: weight 5 + 7 = 12
 
-        let first_weights: usize = chunks[0].positions.iter().map(|p| p.depth as usize).sum();
+        let first_weights: usize = chunks[0]
+            .positions
+            .iter()
+            .map(|p| (p.depth + p.ins + p.del + p.ref_skip + p.fail) as usize)
+            .sum();
         assert!(first_weights >= 10);
-        let second_weights: usize = chunks[1].positions.iter().map(|p| p.depth as usize).sum();
-        assert!(second_weights < 10);
+        let second_weights: usize = chunks[1]
+            .positions
+            .iter()
+            .map(|p| (p.depth + p.ins + p.del + p.ref_skip + p.fail) as usize)
+            .sum();
+        assert!(second_weights < 20);
+    }
+
+    #[test]
+    fn chunk_positions_uses_comprehensive_weight() {
+        // Test that the weight calculation includes all components
+        let positions = vec![
+            GenomicPosition {
+                chrom: "chr3".to_string(),
+                pos: 100,
+                depth: 10,
+                ins: 2,
+                del: 3,
+                ref_skip: 1,
+                fail: 4,
+                near_max_depth: false,
+            },
+            GenomicPosition {
+                chrom: "chr3".to_string(),
+                pos: 101,
+                depth: 15,
+                ins: 1,
+                del: 1,
+                ref_skip: 2,
+                fail: 1,
+                near_max_depth: false,
+            },
+            GenomicPosition {
+                chrom: "chr3".to_string(),
+                pos: 102,
+                depth: 5,
+                ins: 0,
+                del: 0,
+                ref_skip: 0,
+                fail: 0,
+                near_max_depth: false,
+            },
+        ];
+
+        // First position has weight: 10 + 2 + 3 + 1 + 4 = 20
+        // Second position has weight: 15 + 1 + 1 + 2 + 1 = 20
+        // Third position has weight: 5
+        // With chunksize=25:
+        //   - First position added: weight = 20 < 25, continue
+        //   - Second position added: weight = 40 >= 25, flush (both in chunk 1)
+        //   - Third position starts chunk 2: weight = 5
+        let chunks = chunk_positions(positions, 25, 10);
+        assert_eq!(chunks.len(), 2, "Should create 2 chunks");
+        assert_eq!(chunks[0].positions.len(), 2, "First chunk should have 2 positions");
+        assert_eq!(chunks[1].positions.len(), 1, "Second chunk should have 1 position");
+        
+        // Verify first chunk weight includes all components
+        let first_weight: usize = chunks[0]
+            .positions
+            .iter()
+            .map(|p| (p.depth + p.ins + p.del + p.ref_skip + p.fail) as usize)
+            .sum();
+        assert_eq!(first_weight, 40, "First chunk weight should be 40 (20 + 20)");
+        
+        // Verify second chunk weight
+        let second_weight: usize = chunks[1]
+            .positions
+            .iter()
+            .map(|p| (p.depth + p.ins + p.del + p.ref_skip + p.fail) as usize)
+            .sum();
+        assert_eq!(second_weight, 5, "Second chunk weight should be 5");
     }
 }

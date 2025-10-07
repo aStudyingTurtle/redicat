@@ -13,7 +13,7 @@ If REDICAT supports your research, please cite:
 - **Canonical-contig smart defaults:** By default every command operates on the primary human chromosomes (chr1–chr22, chrX, chrY, chrM). Add `--allcontigs` to opt into decoys, patches, or spike-ins when you need full genome coverage.
 - **On-the-fly site vetting:** Depth, N-content, and editing-support thresholds mirror the `bulk` heuristics so only confident loci advance to matrix assembly.
 - **Fearless concurrency:** Rayon thread pools, crossbeam channels, and reader pooling keep pileup traversal and sparse matrix assembly fully saturated on modern CPUs.
-- **Depth-aware chunking:** `bam2mtx` streams TSV manifests with Polars, accumulates `DEPTH` weights until the `--chunksize` budget is spent, and automatically falls back to the narrow `--chunk-size-max-depth` batches whenever `NEAR_MAX_DEPTH=true`.
+- **Depth-aware chunking:** `bam2mtx` streams TSV manifests with Polars, accumulates position weights (`DEPTH + INS + DEL + REF_SKIP + FAIL`) until the `--chunksize` budget is spent, and automatically falls back to the narrow `--chunk-size-max-depth` batches whenever `NEAR_MAX_DEPTH=true`.
 - **Layered architecture:** The library is split into `core` (shared utilities & sparse ops), `engine` (parallel schedulers and position primitives), and `pipeline` (bam2mtx & call workflows), keeping reusable pieces lightweight and testable.
 - **Sparse-first analytics:** All matrix work is written against CSR matrices with adaptive density hints so memory usage tracks the number of edited positions, not the theoretical genome size.
 - **AnnData-native exports:** The toolkit produces `.h5ad` files that slot directly into Python-based workflows (Scanpy, scVI, Seurat via conversion).
@@ -126,8 +126,8 @@ Option reference:
 | —     | `--umi-tag`           | BAM tag containing UMI sequence.                               | `UB`     |
 | —     | `--cb-tag`            | BAM tag containing cell barcode.                               | `CB`     |
 | `-r`  | `--reference`         | Reference FASTA (required for CRAM).                           | optional |
-| `-c`  | `--chunksize`         | Genomic positions per processing chunk (applied to standard loci). | `100000` |
-| —     | `--chunk-size-max-depth` | Maximum hotspot chunk length when `NEAR_MAX_DEPTH` is `true` in the TSV. | `30`     |
+| `-c`  | `--chunksize`         | Genomic position weight budget per processing chunk (applied to standard loci). | `50000` |
+| —     | `--chunk-size-max-depth` | Maximum hotspot chunk length when `NEAR_MAX_DEPTH` is `true` in the TSV. | `3`     |
 | —     | `--matrix-density`    | Hint for CSR buffer sizing.                                    | `0.005`  |
 | `-A`  | `--allcontigs`        | Include decoys and noncanonical contigs.                       | `false`  |
 

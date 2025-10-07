@@ -47,6 +47,7 @@ pub fn configure_global_thread_pool(threads: usize) -> Result<usize> {
 
     match ThreadPoolBuilder::new()
         .num_threads(requested)
+        .stack_size(2 * 1024 * 1024) // 2 MB stack per thread to reduce memory overhead
         .build_global()
     {
         Ok(_) => {

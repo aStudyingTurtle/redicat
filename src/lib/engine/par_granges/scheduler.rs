@@ -45,6 +45,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
+            .stack_size(2 * 1024 * 1024) // 2 MB stack per thread
             .build()
             .expect("Failed to build Rayon thread pool");
 
@@ -178,12 +179,14 @@ impl<R: RegionProcessor + Send + Sync> Engine<R> {
             None => intervals::header_to_intervals(&header, self.chunksize)?,
         };
 
-        let serial_step_size = self.chunksize.saturating_mul(self.threads as u32);
+        // Reduce the multiplier from threads to threads/2 for more aggressive parallelism
+        // This creates more, smaller batches that can be distributed better across threads
+        let batch_multiplier = (self.threads / 2).max(1) as u32;
+        let serial_step_size = self.chunksize.saturating_mul(batch_multiplier);
         // info!("Processing {} contigs", intervals.len());
 
         // Calculate total chunks across all contigs
         let mut total_chunks = 0u32;
-        let _serial_step_size = self.chunksize.saturating_mul(self.threads as u32);
         for (tid_len, _) in target_info.iter() {
             if *tid_len > 0 {
                 total_chunks += ((*tid_len - 1) / serial_step_size) + 1;
@@ -191,7 +194,8 @@ impl<R: RegionProcessor + Send + Sync> Engine<R> {
         }
 
         // Use serial_step_size in trace logging to avoid unused variable warning
-        trace!("Using serial step size: {}", serial_step_size);
+        trace!("Using serial step size: {} (chunk_size {} × batch_multiplier {})", 
+               serial_step_size, self.chunksize, batch_multiplier);
 
         let processed_chunks = std::sync::atomic::AtomicUsize::new(0);
         let log_step = std::cmp::max(1, total_chunks as usize / 10);
