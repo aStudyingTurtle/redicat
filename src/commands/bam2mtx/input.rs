@@ -530,17 +530,28 @@ mod tests {
         //   - Third position starts chunk 2: weight = 5
         let chunks = chunk_positions(positions, 25, 10);
         assert_eq!(chunks.len(), 2, "Should create 2 chunks");
-        assert_eq!(chunks[0].positions.len(), 2, "First chunk should have 2 positions");
-        assert_eq!(chunks[1].positions.len(), 1, "Second chunk should have 1 position");
-        
+        assert_eq!(
+            chunks[0].positions.len(),
+            2,
+            "First chunk should have 2 positions"
+        );
+        assert_eq!(
+            chunks[1].positions.len(),
+            1,
+            "Second chunk should have 1 position"
+        );
+
         // Verify first chunk weight includes all components
         let first_weight: usize = chunks[0]
             .positions
             .iter()
             .map(|p| (p.depth + p.ins + p.del + p.ref_skip + p.fail) as usize)
             .sum();
-        assert_eq!(first_weight, 40, "First chunk weight should be 40 (20 + 20)");
-        
+        assert_eq!(
+            first_weight, 40,
+            "First chunk weight should be 40 (20 + 20)"
+        );
+
         // Verify second chunk weight
         let second_weight: usize = chunks[1]
             .positions

@@ -13,6 +13,8 @@ If REDICAT supports your research, please cite:
 - **Canonical-contig smart defaults:** By default every command operates on the primary human chromosomes (chr1–chr22, chrX, chrY, chrM). Add `--allcontigs` to opt into decoys, patches, or spike-ins when you need full genome coverage.
 - **On-the-fly site vetting:** Depth, N-content, and editing-support thresholds mirror the `bulk` heuristics so only confident loci advance to matrix assembly.
 - **Fearless concurrency:** Rayon thread pools, crossbeam channels, and reader pooling keep pileup traversal and sparse matrix assembly fully saturated on modern CPUs.
+- **Dynamic Rayon work queue:** `ParGranges` now flattens genomic tiles into a global work queue so `bulk` keeps every core busy even when only a handful of contigs remain in flight.
+- **Streaming AnnData assembly:** `bam2mtx` pushes chunk results through a bounded channel into a streaming sparse converter, so `.h5ad` generation no longer requires buffering millions of `PositionData` structs in RAM.
 - **Depth-aware chunking:** `bam2mtx` streams TSV manifests with Polars, accumulates position weights (`DEPTH + INS + DEL + REF_SKIP + FAIL`) until the `--chunksize` budget is spent, and automatically falls back to the narrow `--chunk-size-max-depth` batches whenever `NEAR_MAX_DEPTH=true`.
 - **Layered architecture:** The library is split into `core` (shared utilities & sparse ops), `engine` (parallel schedulers and position primitives), and `pipeline` (bam2mtx & call workflows), keeping reusable pieces lightweight and testable.
 - **Sparse-first analytics:** All matrix work is written against CSR matrices with adaptive density hints so memory usage tracks the number of edited positions, not the theoretical genome size.
@@ -71,7 +73,7 @@ Add `--allcontigs` to any command that should consider every contig in the BAM h
 
 ## Subcommands
 ### `bulk`
-Calculates per-base depth and nucleotide counts across a BAM/CRAM. Filtering options allow you to tune MAPQ, base quality, minimum depth, and an editing-specific heuristic. When `--skip-max-depth` is set to a value less than 2,000,000,000, the `--max-depth` value is automatically adjusted to `--skip-max-depth + 1000`. Results stream to a bgzip-compressed TSV.
+Calculates per-base depth and nucleotide counts across a BAM/CRAM. Filtering options allow you to tune MAPQ, base quality, minimum depth, and an editing-specific heuristic. The revamped scheduler flattens genomic tiles into a unified Rayon work queue and forces small stealable tasks via `with_min_len(1)` + adaptive `with_max_len`, keeping CPU utilisation high for long-running bulk traversals. When `--skip-max-depth` is set to a value less than 2,000,000,000, the `--max-depth` value is automatically adjusted to `--skip-max-depth + 1000`. Results stream to a bgzip-compressed TSV.
 `near_max_depth` flags now key off the observed (post-filter) depth, ensuring the 1% ceiling matches the pileup depth returned by htslib after read rejection.
 Some libraries of `bulk` were taken form the [`perbase`](https://github.com/sstadick/perbase) project.
 
@@ -95,14 +97,14 @@ Option reference:
 | `-A`  | `--allcontigs`        | Traverse every contig instead of canonical set.       | `false`         |
 
 ### `bam2mtx`
-Converts barcoded BAMs into sparse AnnData matrices (per base, per barcode, strand-aware). Accepts precomputed site lists or can bootstrap one via `--two-pass`, which internally runs `bulk` with the same contour filters.
+Converts barcoded BAMs into sparse AnnData matrices (per base, per barcode, strand-aware). Accepts precomputed site lists or can bootstrap one via `--two-pass`, which internally runs `bulk` with the same contour filters. Parallel chunk workers now stream their results through a bounded crossbeam channel into the AnnData writer, eliminating the previous end-of-run aggregation penalty and keeping memory bounded by the active chunk.
 
 Highlights:
 - TSV positions are filtered to canonical contigs unless `--allcontigs` is specified.
 - Depth/N/editing thresholds drop low-quality loci before matrix assembly, matching the first-pass `bulk` defaults.
 - `--two-pass` scouts sites with `bulk --max-depth 8000`, trimming runaway pileups before the heavy second pass.
 - Reader pools and chunk-aware parallelism keep pileups cache-friendly while chunk staging bounds memory.
-- Output matrices respect the density hint supplied via `--matrix-density`.
+- Output matrices respect the density hint supplied via `--matrix-density`, and the streaming converter remaps cell/position indices on the fly before materialising CSR layers.
 - Info-level progress logs report chunk-level completion percentage and ETA so long runs stay observable.
 
 Option reference:
@@ -126,8 +128,8 @@ Option reference:
 | —     | `--umi-tag`           | BAM tag containing UMI sequence.                               | `UB`     |
 | —     | `--cb-tag`            | BAM tag containing cell barcode.                               | `CB`     |
 | `-r`  | `--reference`         | Reference FASTA (required for CRAM).                           | optional |
-| `-c`  | `--chunksize`         | Genomic position weight budget per processing chunk (applied to standard loci). | `50000` |
-| —     | `--chunk-size-max-depth` | Maximum hotspot chunk length when `NEAR_MAX_DEPTH` is `true` in the TSV. | `3`     |
+| `-c`  | `--chunksize`         | Genomic position weight budget per processing chunk (applied to standard loci). | `60000` |
+| —     | `--chunk-size-max-depth` | Maximum hotspot chunk length when `NEAR_MAX_DEPTH` is `true` in the TSV. | `1`     |
 | —     | `--matrix-density`    | Hint for CSR buffer sizing.                                    | `0.005`  |
 | `-A`  | `--allcontigs`        | Include decoys and noncanonical contigs.                       | `false`  |
 
@@ -141,8 +143,8 @@ Important options:
 
 ## Performance Notes
 - **Reader pooling:** Each worker thread checks out an `IndexedReader` from a pool, avoiding reopen/seek penalties when iterating across genomic tiles.
-- **Triplet batching:** Sparse matrices are assembled from thread-local batches of `(row, col, value)` triplets, eliminating cross-thread contention.
-- **Adaptive chunking:** Dual CLI knobs (`--chunksize` for the depth-weighted standard loci budget and `--chunk-size-max-depth` for hotspot batch caps) govern the parallel granularity for `bam2mtx` (and the batch size for AnnData writes), while `ParGranges` continues to honour the regular `--chunksize` setting in `bulk`.
+- **Triplet batching:** Sparse matrices are assembled from thread-local batches of `(row, col, value)` triplets, eliminating cross-thread contention, and the streaming writer drains them via bounded channels to keep peak memory low.
+- **Adaptive chunking:** Dual CLI knobs (`--chunksize` for the depth-weighted standard loci budget and `--chunk-size-max-depth` for hotspot batch caps) govern the parallel granularity for `bam2mtx` (and the batch size for AnnData writes), while the refactored `ParGranges` scheduler flattens tiles into a single Rayon queue so `bulk` honors `--chunksize` without serial bottlenecks.
 - **Chunk-level fetch & depth guards:** `bam2mtx` batches contiguous sites per contig, records observed depth, and—in `--two-pass` mode—relies on the first-pass `bulk` run (honoring `--skip-max-depth`) to prune oversaturated loci before dense pileups reach the matrix stage.
 - **Progress-aware logging:** Chunk processors emit periodic `%` complete + ETA updates so multi-hour conversions remain easy to follow from the console.
 

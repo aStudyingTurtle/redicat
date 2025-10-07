@@ -1,9 +1,9 @@
 //! AnnData output functionality with advanced performance optimizations
 
-use crate::pipeline::bam2mtx::processor::PositionData;
+use crate::pipeline::bam2mtx::processor::{BaseCounts, PositionData};
 use anndata::{AnnData, AnnDataOp, AxisArraysOp};
 use anndata_hdf5::H5;
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use log::info;
 use nalgebra_sparse::coo::CooMatrix;
 use nalgebra_sparse::csr::CsrMatrix;
@@ -41,6 +41,127 @@ impl Default for AnnDataConfig {
             matrix_density: 0.005, // Typical sparsity for single-cell data
             batch_size: 2500,      // Moderate batch size
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::bam2mtx::processor::StrandBaseCounts;
+    use anyhow::Result;
+    use std::collections::HashMap;
+
+    fn make_counts(
+        forward: (u32, u32, u32, u32),
+        reverse: (u32, u32, u32, u32),
+    ) -> StrandBaseCounts {
+        StrandBaseCounts {
+            forward: BaseCounts {
+                a: forward.0,
+                t: forward.1,
+                g: forward.2,
+                c: forward.3,
+            },
+            reverse: BaseCounts {
+                a: reverse.0,
+                t: reverse.1,
+                g: reverse.2,
+                c: reverse.3,
+            },
+        }
+    }
+
+    fn position(chrom: &str, pos: u64, entries: Vec<(&str, StrandBaseCounts)>) -> PositionData {
+        let mut counts: HashMap<String, StrandBaseCounts> = HashMap::with_capacity(entries.len());
+        for (cell, value) in entries {
+            counts.insert(cell.to_string(), value);
+        }
+        PositionData {
+            chrom: chrom.to_string(),
+            pos,
+            counts,
+        }
+    }
+
+    fn matrix_entries(matrix: &CsrMatrix<f32>) -> Vec<(usize, usize, f32)> {
+        CooMatrix::from(matrix)
+            .triplet_iter()
+            .map(|(r, c, v)| (r, c, *v))
+            .collect()
+    }
+
+    #[test]
+    fn streaming_builder_produces_expected_sparse_layers() -> Result<()> {
+        let mut config = AnnDataConfig::default();
+        config.stranded = true;
+        config.threads = 2;
+        config.chunk_size = 8;
+        config.batch_size = 4;
+
+        let data = vec![
+            position(
+                "chr1",
+                1,
+                vec![
+                    ("AAAC", make_counts((2, 0, 1, 0), (0, 0, 0, 0))),
+                    ("GGGG", make_counts((0, 1, 0, 0), (0, 0, 0, 2))),
+                ],
+            ),
+            position(
+                "chr1",
+                2,
+                vec![
+                    ("AAAC", make_counts((0, 0, 0, 0), (1, 0, 0, 0))),
+                    ("GGGG", make_counts((3, 0, 0, 0), (0, 0, 0, 0))),
+                ],
+            ),
+        ];
+
+        let mut builder = StreamingMatrixBuilder::new(config.clone());
+        for entry in data {
+            builder.ingest(entry);
+        }
+
+        let (returned_config, parts) = builder.build_parts()?;
+
+        assert_eq!(returned_config.stranded, config.stranded);
+
+        let StreamingAnnDataParts {
+            cell_names,
+            position_names,
+            forward_layers,
+            reverse_layers,
+            ..
+        } = parts;
+
+        assert_eq!(cell_names, vec!["AAAC".to_string(), "GGGG".to_string()]);
+        assert_eq!(
+            position_names,
+            vec!["chr1:1".to_string(), "chr1:2".to_string()]
+        );
+
+        assert_eq!(forward_layers.len(), 4);
+
+        let forward_a = matrix_entries(&forward_layers[0]);
+        assert_eq!(forward_a, vec![(0, 0, 2.0), (1, 1, 3.0)]);
+
+        let forward_t = matrix_entries(&forward_layers[1]);
+        assert_eq!(forward_t, vec![(1, 0, 1.0)]);
+
+        let forward_g = matrix_entries(&forward_layers[2]);
+        assert_eq!(forward_g, vec![(0, 0, 1.0)]);
+
+        let forward_c = matrix_entries(&forward_layers[3]);
+        assert!(forward_c.is_empty());
+
+        assert_eq!(reverse_layers.len(), 4);
+        let reverse_a = matrix_entries(&reverse_layers[0]);
+        assert_eq!(reverse_a, vec![(0, 1, 1.0)]);
+
+        let reverse_c = matrix_entries(&reverse_layers[3]);
+        assert_eq!(reverse_c, vec![(1, 0, 2.0)]);
+
+        Ok(())
     }
 }
 
@@ -171,6 +292,15 @@ pub struct AnnDataConverter {
     config: AnnDataConfig,
     #[allow(dead_code)]
     string_interner: Arc<StringInterner>,
+}
+
+impl Clone for AnnDataConverter {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            string_interner: Arc::clone(&self.string_interner),
+        }
+    }
 }
 
 impl AnnDataConverter {
@@ -484,6 +614,28 @@ impl AnnDataConverter {
         }
     }
 
+    /// Convert an iterator of [`PositionData`] into AnnData using a streaming pipeline.
+    ///
+    /// This variant avoids materialising the entire dataset in memory by reducing each
+    /// chunk to sparse triplets as soon as it arrives. Identifiers are interned on the
+    /// fly and remapped into sorted order during finalisation.
+    pub fn convert_streaming<I>(&self, data_iter: I, output_path: &Path) -> Result<AnnData<H5>>
+    where
+        I: IntoIterator<Item = PositionData>,
+    {
+        info!(
+            "Starting streaming AnnData conversion with {} threads...",
+            self.config.threads
+        );
+
+        let mut builder = StreamingMatrixBuilder::new(self.config.clone());
+        for position in data_iter.into_iter() {
+            builder.ingest(position);
+        }
+
+        builder.finalize(output_path)
+    }
+
     /// Main conversion function integrating all optimizations
     pub fn convert(
         &self,
@@ -589,5 +741,342 @@ impl AnnDataConverter {
     /// * `Result<()>` - Ok if successful, Err otherwise
     pub fn write_to_file(&self, _adata: &AnnData<H5>, _output_path: &Path) -> Result<()> {
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct Triplet {
+    row: u32,
+    col: u32,
+    value: u32,
+}
+
+struct StreamingAnnDataParts {
+    cell_names: Vec<String>,
+    position_names: Vec<String>,
+    forward_layers: Vec<CsrMatrix<f32>>,
+    reverse_layers: Vec<CsrMatrix<f32>>,
+    observed_positions: usize,
+}
+
+struct StreamingMatrixBuilder {
+    config: AnnDataConfig,
+    cell_index: FxHashMap<String, u32>,
+    cell_names: Vec<String>,
+    position_index: FxHashMap<String, u32>,
+    position_names: Vec<String>,
+    forward_triplets: [Vec<Triplet>; 4],
+    reverse_triplets: Option<[Vec<Triplet>; 4]>,
+    total_positions: usize,
+}
+
+impl StreamingMatrixBuilder {
+    fn new(config: AnnDataConfig) -> Self {
+        let forward_triplets = std::array::from_fn(|_| Vec::new());
+        let reverse_triplets = if config.stranded {
+            Some(std::array::from_fn(|_| Vec::new()))
+        } else {
+            None
+        };
+
+        Self {
+            config,
+            cell_index: FxHashMap::default(),
+            cell_names: Vec::new(),
+            position_index: FxHashMap::default(),
+            position_names: Vec::new(),
+            forward_triplets,
+            reverse_triplets,
+            total_positions: 0,
+        }
+    }
+
+    fn ingest(&mut self, data: PositionData) {
+        let position_key = Self::format_position(&data.chrom, data.pos);
+        let col_idx = self.ensure_position(position_key);
+
+        for (cell, counts) in data.counts.into_iter() {
+            let row_idx = self.ensure_cell(cell);
+            if self.config.stranded {
+                Self::append_counts(
+                    &mut self.forward_triplets,
+                    row_idx,
+                    col_idx,
+                    &counts.forward,
+                );
+                if let Some(reverse) = &mut self.reverse_triplets {
+                    Self::append_counts(reverse, row_idx, col_idx, &counts.reverse);
+                }
+            } else {
+                let merged = BaseCounts {
+                    a: counts.forward.a + counts.reverse.a,
+                    t: counts.forward.t + counts.reverse.t,
+                    g: counts.forward.g + counts.reverse.g,
+                    c: counts.forward.c + counts.reverse.c,
+                };
+                Self::append_counts(&mut self.forward_triplets, row_idx, col_idx, &merged);
+            }
+        }
+
+        self.total_positions = self.total_positions.saturating_add(1);
+    }
+
+    fn finalize(self, output_path: &Path) -> Result<AnnData<H5>> {
+        let (config, parts) = self.build_parts()?;
+        Self::write_parts(config, parts, output_path)
+    }
+
+    fn build_parts(self) -> Result<(AnnDataConfig, StreamingAnnDataParts)> {
+        let StreamingMatrixBuilder {
+            config,
+            cell_names,
+            position_names,
+            forward_triplets,
+            reverse_triplets,
+            total_positions,
+            ..
+        } = self;
+
+        let n_cells = cell_names.len();
+        let n_positions = position_names.len();
+
+        let mut sorted_cells = cell_names.clone();
+        sorted_cells.par_sort_unstable();
+        let mut sorted_positions = position_names.clone();
+        sorted_positions.par_sort_unstable();
+
+        let cell_remap = Self::build_remap(&cell_names, &sorted_cells)?;
+        let position_remap = Self::build_remap(&position_names, &sorted_positions)?;
+
+        let mut forward_triplets = Vec::from(forward_triplets);
+        Self::remap_triplets(&mut forward_triplets, &cell_remap, &position_remap);
+        let forward_layers: Vec<CsrMatrix<f32>> = forward_triplets
+            .into_iter()
+            .map(|triplets| Self::triplets_to_csr(triplets, n_cells, n_positions))
+            .collect::<Result<Vec<CsrMatrix<f32>>, anyhow::Error>>()?;
+
+        let reverse_layers: Vec<CsrMatrix<f32>> = if let Some(reverse) = reverse_triplets {
+            let mut reverse_vec = Vec::from(reverse);
+            Self::remap_triplets(&mut reverse_vec, &cell_remap, &position_remap);
+            reverse_vec
+                .into_iter()
+                .map(|triplets| Self::triplets_to_csr(triplets, n_cells, n_positions))
+                .collect::<Result<Vec<CsrMatrix<f32>>, anyhow::Error>>()?
+        } else {
+            Vec::new()
+        };
+
+        Ok((
+            config,
+            StreamingAnnDataParts {
+                cell_names: sorted_cells,
+                position_names: sorted_positions,
+                forward_layers,
+                reverse_layers,
+                observed_positions: total_positions,
+            },
+        ))
+    }
+
+    fn write_parts(
+        config: AnnDataConfig,
+        parts: StreamingAnnDataParts,
+        output_path: &Path,
+    ) -> Result<AnnData<H5>> {
+        let StreamingAnnDataParts {
+            cell_names,
+            position_names,
+            forward_layers,
+            reverse_layers,
+            observed_positions,
+        } = parts;
+
+        info!(
+            "Streaming builder observed {} cells × {} positions ({} input loci)",
+            cell_names.len(),
+            position_names.len(),
+            observed_positions
+        );
+
+        let adata = AnnData::<H5>::new(output_path)
+            .with_context(|| format!("Failed to create AnnData file at {:?}", output_path))?;
+
+        let (obs_names, var_names) = rayon::join(
+            || {
+                cell_names
+                    .clone()
+                    .into_iter()
+                    .collect::<anndata::data::array::dataframe::DataFrameIndex>()
+            },
+            || {
+                position_names
+                    .clone()
+                    .into_iter()
+                    .collect::<anndata::data::array::dataframe::DataFrameIndex>()
+            },
+        );
+
+        let zero_matrix = || CsrMatrix::zeros(cell_names.len(), position_names.len());
+        let primary_matrix = forward_layers
+            .get(0)
+            .cloned()
+            .unwrap_or_else(|| zero_matrix());
+        adata.set_x(primary_matrix.clone())?;
+
+        let forward_layer_names = ["A1", "T1", "G1", "C1"];
+        for (idx, layer_name) in forward_layer_names.iter().enumerate() {
+            let matrix = forward_layers
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| zero_matrix());
+            adata.layers().add(layer_name, matrix)?;
+        }
+
+        if config.stranded {
+            let reverse_layer_names = ["A0", "T0", "G0", "C0"];
+            for (idx, layer_name) in reverse_layer_names.iter().enumerate() {
+                let matrix = reverse_layers
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| zero_matrix());
+                adata.layers().add(layer_name, matrix)?;
+            }
+        }
+
+        adata.set_obs_names(obs_names)?;
+        adata.set_var_names(var_names)?;
+
+        Ok(adata)
+    }
+
+    fn append_counts(
+        target: &mut [Vec<Triplet>; 4],
+        row_idx: u32,
+        col_idx: u32,
+        counts: &BaseCounts,
+    ) {
+        if counts.a > 0 {
+            target[0].push(Triplet {
+                row: row_idx,
+                col: col_idx,
+                value: counts.a,
+            });
+        }
+        if counts.t > 0 {
+            target[1].push(Triplet {
+                row: row_idx,
+                col: col_idx,
+                value: counts.t,
+            });
+        }
+        if counts.g > 0 {
+            target[2].push(Triplet {
+                row: row_idx,
+                col: col_idx,
+                value: counts.g,
+            });
+        }
+        if counts.c > 0 {
+            target[3].push(Triplet {
+                row: row_idx,
+                col: col_idx,
+                value: counts.c,
+            });
+        }
+    }
+
+    fn ensure_cell(&mut self, cell: String) -> u32 {
+        if let Some(&idx) = self.cell_index.get(cell.as_str()) {
+            idx
+        } else {
+            let idx = self.cell_names.len() as u32;
+            self.cell_index.insert(cell.clone(), idx);
+            self.cell_names.push(cell);
+            idx
+        }
+    }
+
+    fn ensure_position(&mut self, key: String) -> u32 {
+        if let Some(&idx) = self.position_index.get(key.as_str()) {
+            idx
+        } else {
+            let idx = self.position_names.len() as u32;
+            self.position_index.insert(key.clone(), idx);
+            self.position_names.push(key);
+            idx
+        }
+    }
+
+    fn remap_triplets(triplets: &mut [Vec<Triplet>], cell_remap: &[u32], position_remap: &[u32]) {
+        for bucket in triplets.iter_mut() {
+            for triplet in bucket.iter_mut() {
+                triplet.row = cell_remap[triplet.row as usize];
+                triplet.col = position_remap[triplet.col as usize];
+            }
+        }
+    }
+
+    fn build_remap(original: &[String], sorted: &[String]) -> Result<Vec<u32>> {
+        let mut lookup = FxHashMap::with_capacity_and_hasher(sorted.len(), Default::default());
+        for (idx, name) in sorted.iter().enumerate() {
+            lookup.insert(name.as_str(), idx as u32);
+        }
+
+        original
+            .iter()
+            .map(|name| {
+                lookup
+                    .get(name.as_str())
+                    .copied()
+                    .with_context(|| format!("Missing remap entry for {}", name))
+            })
+            .collect()
+    }
+
+    fn triplets_to_csr(
+        mut triplets: Vec<Triplet>,
+        n_rows: usize,
+        n_cols: usize,
+    ) -> Result<CsrMatrix<f32>> {
+        if triplets.is_empty() {
+            return Ok(CsrMatrix::zeros(n_rows, n_cols));
+        }
+
+        triplets.sort_unstable_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
+
+        let mut merged: Vec<Triplet> = Vec::with_capacity(triplets.len());
+        let mut iter = triplets.into_iter();
+        let mut current = iter.next().unwrap();
+        for item in iter {
+            if item.row == current.row && item.col == current.col {
+                current.value = current.value.saturating_add(item.value);
+            } else {
+                merged.push(current);
+                current = item;
+            }
+        }
+        merged.push(current);
+
+        let mut rows = Vec::with_capacity(merged.len());
+        let mut cols = Vec::with_capacity(merged.len());
+        let mut values = Vec::with_capacity(merged.len());
+
+        for Triplet { row, col, value } in merged {
+            rows.push(row as usize);
+            cols.push(col as usize);
+            values.push(value as f32);
+        }
+
+        let coo = CooMatrix::try_from_triplets(n_rows, n_cols, rows, cols, values)
+            .map_err(|err| anyhow!("Failed to build COO matrix from streaming triplets: {err}"))?;
+        Ok(CsrMatrix::from(&coo))
+    }
+
+    fn format_position(chrom: &str, pos: u64) -> String {
+        let mut buffer = String::with_capacity(chrom.len() + 24);
+        buffer.push_str(chrom);
+        buffer.push(':');
+        buffer.push_str(&pos.to_string());
+        buffer
     }
 }

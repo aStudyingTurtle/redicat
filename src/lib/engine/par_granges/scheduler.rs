@@ -5,7 +5,15 @@ use num_cpus;
 use rayon::prelude::*;
 use rust_htslib::bam::{IndexedReader, Read};
 use rust_lapper::Lapper;
-use std::{convert::TryInto, path::PathBuf, thread};
+use std::{
+    convert::TryInto,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    thread,
+};
 
 use super::intervals;
 use super::types::{RegionProcessor, BYTES_IN_A_GIGABYTE, CHANNEL_SIZE_MODIFIER, CHUNKSIZE};
@@ -121,6 +129,53 @@ struct Engine<R: RegionProcessor + Send + Sync> {
     processor: R,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct RegionTask {
+    tid: u32,
+    start: u32,
+    stop: u32,
+}
+
+fn materialize_region_tasks(
+    intervals: Vec<Lapper<u32, ()>>,
+    target_info: &[(u32, String)],
+    tile: u32,
+    reserve: usize,
+) -> Vec<RegionTask> {
+    let tile = tile.max(1);
+    let mut work = Vec::with_capacity(reserve);
+    let target_len = target_info.len();
+
+    for (tid_idx, contig_intervals) in intervals.into_iter().enumerate() {
+        if tid_idx >= target_len {
+            break;
+        }
+
+        let (span, _) = target_info[tid_idx];
+        if span == 0 {
+            continue;
+        }
+
+        let tid = tid_idx as u32;
+        for interval in contig_intervals.iter() {
+            let mut cursor = interval.start;
+            while cursor < interval.stop {
+                let stop = std::cmp::min(cursor + tile, interval.stop);
+                if stop > cursor {
+                    work.push(RegionTask {
+                        tid,
+                        start: cursor,
+                        stop,
+                    });
+                }
+                cursor = stop;
+            }
+        }
+    }
+
+    work
+}
+
 impl<R: RegionProcessor + Send + Sync> Engine<R> {
     fn run(self, sender: crossbeam::channel::Sender<R::P>) -> Result<()> {
         info!("Reading from {:?}", self.reads);
@@ -179,92 +234,72 @@ impl<R: RegionProcessor + Send + Sync> Engine<R> {
             None => intervals::header_to_intervals(&header, self.chunksize)?,
         };
 
-        // Reduce the multiplier from threads to threads/2 for more aggressive parallelism
-        // This creates more, smaller batches that can be distributed better across threads
-        let batch_multiplier = (self.threads / 2).max(1) as u32;
-        let serial_step_size = self.chunksize.saturating_mul(batch_multiplier);
-        // info!("Processing {} contigs", intervals.len());
+        let tile = self.chunksize.max(1);
 
-        // Calculate total chunks across all contigs
-        let mut total_chunks = 0u32;
-        for (tid_len, _) in target_info.iter() {
-            if *tid_len > 0 {
-                total_chunks += ((*tid_len - 1) / serial_step_size) + 1;
-            }
+        let estimated_total_chunks: usize = target_info
+            .iter()
+            .filter(|(len, _)| *len > 0)
+            .map(|(len, _)| (((*len - 1) / tile) + 1) as usize)
+            .sum();
+
+        let work = materialize_region_tasks(intervals, &target_info, tile, estimated_total_chunks);
+
+        if work.is_empty() {
+            info!("No intervals scheduled for processing; exiting early");
+            return Ok(());
         }
 
-        // Use serial_step_size in trace logging to avoid unused variable warning
-        trace!("Using serial step size: {} (chunk_size {} × batch_multiplier {})", 
-               serial_step_size, self.chunksize, batch_multiplier);
+        let total_chunks = work.len();
+        let log_step = std::cmp::max(1, total_chunks / 10);
+        trace!(
+            "Scheduling {} region tasks (chunk size {}) across {} worker threads",
+            total_chunks,
+            tile,
+            self.threads
+        );
 
-        let processed_chunks = std::sync::atomic::AtomicUsize::new(0);
-        let log_step = std::cmp::max(1, total_chunks as usize / 10);
+        let processed_chunks = AtomicUsize::new(0);
+        let target_info = Arc::new(target_info);
+        let total_chunks_f = total_chunks as f64;
 
-        intervals
-            .into_par_iter()
-            .enumerate()
-            .for_each(|(tid_idx, contig_intervals)| {
-                let tid = tid_idx as u32;
-                let (tid_end, tid_name) = match target_info.get(tid as usize) {
-                    Some((len, name)) => (*len, name.clone()),
-                    None => {
-                        error!("Missing target info for TID {}", tid);
-                        return;
-                    }
-                };
-                if tid_end == 0 {
-                    error!("Invalid target length for TID {}", tid);
-                    return;
-                }
+        let worker_scale = (self.threads * 8).max(1);
+        let scheduling_granularity =
+            ((total_chunks + worker_scale.saturating_sub(1)) / worker_scale).max(1);
 
-                for chunk_start in (0..tid_end).step_by(serial_step_size as usize) {
-                    let chunk_end = std::cmp::min(chunk_start + serial_step_size, tid_end);
-
+        work.into_par_iter()
+            .with_min_len(1)
+            .with_max_len(scheduling_granularity)
+            .for_each_init(
+                || (sender.clone(), Arc::clone(&target_info)),
+                |(snd, target_info), task| {
                     trace!(
-                        "Batch processing {}:{}-{}",
-                        tid_name,
-                        chunk_start,
-                        chunk_end
+                        "Processing TID {} interval {}-{}",
+                        task.tid,
+                        task.start,
+                        task.stop
                     );
 
-                    let region_intervals: Vec<_> =
-                        Lapper::find(&contig_intervals, chunk_start, chunk_end)
-                            .map(|iv| {
-                                let start = std::cmp::max(iv.start, chunk_start);
-                                let stop = std::cmp::min(iv.stop, chunk_end);
-                                (start, stop)
-                            })
-                            .collect();
-
-                    if region_intervals.is_empty() {
-                        continue;
+                    let results = self
+                        .processor
+                        .process_region(task.tid, task.start, task.stop);
+                    for item in results {
+                        if snd.send(item).is_err() {
+                            warn!("Channel closed; terminating region processing early");
+                            return;
+                        }
                     }
 
-                    let completed =
-                        processed_chunks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    if completed == total_chunks as usize || completed % log_step == 0 {
-                        let percent = (completed as f64 / total_chunks as f64) * 100.0;
+                    let completed = processed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
+                    if completed == total_chunks || completed % log_step == 0 {
+                        let (_, tid_name) = &target_info[task.tid as usize];
+                        let percent = (completed as f64 / total_chunks_f) * 100.0;
                         info!(
-                            "Processed {:.1}% ({} / {} chunks)",
-                            percent, completed, total_chunks
+                            "Processed {:.1}% ({} / {} chunks) – {}:{}-{}",
+                            percent, completed, total_chunks, tid_name, task.start, task.stop
                         );
                     }
-
-                    region_intervals.into_par_iter().for_each_with(
-                        sender.clone(),
-                        |snd, (start, stop)| {
-                            trace!("Processing {}:{}-{} on TID {}", tid_name, start, stop, tid);
-                            let results = self.processor.process_region(tid, start, stop);
-                            for item in results {
-                                if snd.send(item).is_err() {
-                                    warn!("Channel closed; terminating region processing early");
-                                    return;
-                                }
-                            }
-                        },
-                    );
-                }
-            });
+                },
+            );
 
         Ok(())
     }
@@ -283,6 +318,27 @@ mod tests {
 
     use crate::engine::position::pileup_position::PileupPosition;
     use crate::engine::position::Position;
+
+    #[test]
+    fn region_task_materialization_respects_chunk_size() {
+        let intervals = vec![Lapper::new(vec![Interval {
+            start: 0,
+            stop: 120,
+            val: (),
+        }])];
+        let target_info = vec![(120_u32, "chr1".to_string())];
+
+        let tasks = super::materialize_region_tasks(intervals, &target_info, 50, 0);
+
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].tid, 0);
+        assert_eq!(tasks[0].start, 0);
+        assert_eq!(tasks[0].stop, 50);
+        assert_eq!(tasks[1].start, 50);
+        assert_eq!(tasks[1].stop, 100);
+        assert_eq!(tasks[2].start, 100);
+        assert_eq!(tasks[2].stop, 120);
+    }
 
     struct TestProcessor;
 
