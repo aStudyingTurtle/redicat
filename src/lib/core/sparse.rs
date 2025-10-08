@@ -6,7 +6,8 @@ use nalgebra_sparse::ops::serial::spadd_csr_prealloc;
 use nalgebra_sparse::ops::Op;
 use nalgebra_sparse::{CooMatrix, CsrMatrix};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 pub struct SparseOps;
 
@@ -112,8 +113,8 @@ impl SparseOps {
             return Ok(CsrMatrix::zeros(nrows, 0));
         }
 
-        // Create efficient column mapping
-        let col_map: HashMap<usize, usize> = keep_indices
+        // Create efficient column mapping using FxHashMap for better performance
+        let col_map: FxHashMap<usize, usize> = keep_indices
             .iter()
             .enumerate()
             .map(|(new_idx, &old_idx)| (old_idx, new_idx))
@@ -200,7 +201,12 @@ impl SparseOps {
             .collect()
     }
 
-    /// Element-wise multiplication using optimized sparse operations
+    /// Element-wise multiplication using optimized two-pointer algorithm for sparse matrices
+    /// 
+    /// This implementation uses a sorted two-pointer merge algorithm which is significantly
+    /// faster than HashMap-based intersection for sparse matrices. CSR format guarantees
+    /// column indices are already sorted within each row, allowing O(nnz_a + nnz_b) complexity
+    /// instead of O(nnz_a * log(nnz_b)) with HashMap lookups.
     pub fn element_wise_multiply(a: &CsrMatrix<u32>, b: &CsrMatrix<u8>) -> Result<CsrMatrix<u32>> {
         if a.nrows() != b.nrows() || a.ncols() != b.ncols() {
             return Err(RedicatError::DimensionMismatch {
@@ -209,41 +215,51 @@ impl SparseOps {
             });
         }
 
-        // Use parallel processing for element-wise multiplication
+        // Use parallel processing with two-pointer algorithm for element-wise multiplication
+        // SmallVec optimizes for typical sparse row sizes (most rows have < 32 non-zero elements)
         let triplets: Vec<(usize, usize, u32)> = (0..a.nrows())
             .into_par_iter()
             .flat_map(|row_idx| {
                 let a_row = a.row(row_idx);
                 let b_row = b.row(row_idx);
 
-                // Create maps for efficient intersection
-                let a_map: HashMap<usize, u32> = a_row
-                    .col_indices()
-                    .iter()
-                    .zip(a_row.values())
-                    .map(|(&col, &val)| (col, val))
-                    .collect();
+                let a_cols = a_row.col_indices();
+                let a_vals = a_row.values();
+                let b_cols = b_row.col_indices();
+                let b_vals = b_row.values();
 
-                let b_map: HashMap<usize, u8> = b_row
-                    .col_indices()
-                    .iter()
-                    .zip(b_row.values())
-                    .map(|(&col, &val)| (col, val))
-                    .collect();
+                // Two-pointer algorithm for sorted sparse row intersection
+                // CSR format guarantees column indices are sorted, so we can use merge-like algorithm
+                let mut result: SmallVec<[(usize, usize, u32); 32]> = SmallVec::new();
+                let mut a_idx = 0;
+                let mut b_idx = 0;
 
-                // Compute intersection efficiently
-                a_map
-                    .into_iter()
-                    .filter_map(|(col, a_val)| {
-                        b_map.get(&col).and_then(|&b_val| {
-                            if b_val > 0 {
-                                Some((row_idx, col, a_val))
-                            } else {
-                                None
+                while a_idx < a_cols.len() && b_idx < b_cols.len() {
+                    let a_col = a_cols[a_idx];
+                    let b_col = b_cols[b_idx];
+
+                    match a_col.cmp(&b_col) {
+                        std::cmp::Ordering::Equal => {
+                            // Column indices match - this is an intersection point
+                            if b_vals[b_idx] > 0 {
+                                result.push((row_idx, a_col, a_vals[a_idx]));
                             }
-                        })
-                    })
-                    .collect::<Vec<_>>()
+                            a_idx += 1;
+                            b_idx += 1;
+                        }
+                        std::cmp::Ordering::Less => {
+                            // a has a column that b doesn't have yet
+                            a_idx += 1;
+                        }
+                        std::cmp::Ordering::Greater => {
+                            // b has a column that a doesn't have yet
+                            b_idx += 1;
+                        }
+                    }
+                }
+
+                // Convert SmallVec to Vec for flat_map compatibility
+                result.into_vec()
             })
             .collect();
 

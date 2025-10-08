@@ -18,6 +18,8 @@ If REDICAT supports your research, please cite:
 - **Depth-aware chunking:** `bam2mtx` streams TSV manifests with Polars, accumulates position weights (`DEPTH + INS + DEL + REF_SKIP + FAIL`) until the `--chunksize` budget is spent, and automatically falls back to the narrow `--chunk-size-max-depth` batches whenever `NEAR_MAX_DEPTH=true`.
 - **Layered architecture:** The library is split into `core` (shared utilities & sparse ops), `engine` (parallel schedulers and position primitives), and `pipeline` (bam2mtx & call workflows), keeping reusable pieces lightweight and testable.
 - **Sparse-first analytics:** All matrix work is written against CSR matrices with adaptive density hints so memory usage tracks the number of edited positions, not the theoretical genome size.
+- **Optimized sparse operations:** Uses two-pointer algorithms for sparse matrix operations (O(nnz) complexity) instead of HashMap-based approaches, with SmallVec for temporary allocations and FxHashMap for faster non-cryptographic hashing.
+- **Minimal memory overhead:** Arc clones are kept to minimum, performance-critical paths avoid unnecessary allocations, and streaming converters maintain bounded memory usage.
 - **AnnData-native exports:** The toolkit produces `.h5ad` files that slot directly into Python-based workflows (Scanpy, scVI, Seurat via conversion).
 
 ![](./imgs/redicat-1.png)

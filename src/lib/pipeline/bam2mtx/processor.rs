@@ -1,6 +1,4 @@
 //! BAM file processing for single-cell data
-
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -35,12 +33,12 @@ pub struct StrandBaseCounts {
 /// Processed data for a specific genomic position
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PositionData {
-    /// Chromosome name
-    pub chrom: String,
+    /// Numeric contig identifier (matches the BAM header TID)
+    pub contig_id: u32,
     /// 1-based genomic position
     pub pos: u64,
-    /// Counts per cell barcode
-    pub counts: HashMap<String, StrandBaseCounts>,
+    /// Counts per cell barcode (indexed by whitelist order)
+    pub counts: FxHashMap<u32, StrandBaseCounts>,
 }
 
 /// Consensus code used to indicate conflicting UMI calls
@@ -220,10 +218,10 @@ impl BamProcessor {
 
         // Fetch the region
         reader.fetch((tid, start_pos, end_pos))?;
-        let mut pileups: bam::pileup::Pileups<'_, bam::IndexedReader> = reader.pileup();
-        pileups.set_max_depth(i32::MAX as u32);
-        let mut counts: FxHashMap<String, StrandBaseCounts> = FxHashMap::default();
-        let mut umi_consensus: FxHashMap<(String, String), u8> = FxHashMap::default();
+    let mut pileups: bam::pileup::Pileups<'_, bam::IndexedReader> = reader.pileup();
+    pileups.set_max_depth(i32::MAX as u32);
+    let mut counts: FxHashMap<u32, StrandBaseCounts> = FxHashMap::default();
+    let mut umi_consensus: FxHashMap<(u32, String), u8> = FxHashMap::default();
 
         // Process pileup
         for pileup in pileups {
@@ -245,15 +243,16 @@ impl BamProcessor {
                 // }
 
                 let record = read.record();
-                let cell_barcode =
-                    match decode_cell_barcode(&record, self.config.cell_barcode_tag.as_bytes())? {
-                        Some(barcode) => barcode,
+                let cell_id = match decode_cell_barcode(
+                    &record,
+                    self.config.cell_barcode_tag.as_bytes(),
+                )? {
+                    Some(barcode) => match self.barcode_processor.id_of(&barcode) {
+                        Some(id) => id,
                         None => continue,
-                    };
-
-                if !self.barcode_processor.is_valid(&cell_barcode) {
-                    continue;
-                }
+                    },
+                    None => continue,
+                };
 
                 let umi = match decode_umi(&record, self.config.umi_tag.as_bytes())? {
                     Some(umi) => umi,
@@ -264,7 +263,7 @@ impl BamProcessor {
                 if let Some(encoded) = encode_call(self.config.stranded, base, record.is_reverse())
                 {
                     umi_consensus
-                        .entry((cell_barcode, umi))
+                        .entry((cell_id, umi))
                         .and_modify(|existing| {
                             if *existing != encoded {
                                 *existing = UMI_CONFLICT_CODE;
@@ -276,25 +275,20 @@ impl BamProcessor {
         }
 
         // Aggregate counts by cell barcode
-        let mut position_counts = HashMap::with_capacity(counts.len());
-        for ((cell_barcode, _umi), encoded) in umi_consensus.drain() {
+        for ((cell_id, _umi), encoded) in umi_consensus.drain() {
             if encoded == UMI_CONFLICT_CODE {
                 continue;
             }
 
-            let counts_entry = counts.entry(cell_barcode).or_default();
+            let counts_entry = counts.entry(cell_id).or_default();
 
             apply_encoded_call(self.config.stranded, encoded, counts_entry);
         }
 
-        for (barcode, strand_counts) in counts.drain() {
-            position_counts.insert(barcode, strand_counts);
-        }
-
         Ok(PositionData {
-            chrom: chrom.to_string(),
+            contig_id: tid,
             pos,
-            counts: position_counts,
+            counts,
         })
     }
 

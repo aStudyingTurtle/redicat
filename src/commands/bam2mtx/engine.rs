@@ -7,7 +7,6 @@ use redicat_lib::bam2mtx::processor::{
 };
 use rust_htslib::bam::{self, Read};
 use rustc_hash::FxHashMap;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,6 +18,7 @@ pub struct OptimizedChunkProcessor {
     config: BamProcessorConfig,
     barcode_processor: Arc<BarcodeProcessor>,
     tid_lookup: FxHashMap<String, u32>,
+    contig_names: Arc<Vec<String>>,
     count_capacity_hint: usize,
     umi_capacity_hint: usize,
     reader_pool: Mutex<Vec<bam::IndexedReader>>,
@@ -36,9 +36,13 @@ impl OptimizedChunkProcessor {
         let mut tid_lookup =
             FxHashMap::with_capacity_and_hasher(header.target_count() as usize, Default::default());
 
+        let mut contig_names = Vec::with_capacity(header.target_count() as usize);
         for tid in 0..header.target_count() {
             if let Ok(name) = std::str::from_utf8(header.tid2name(tid)) {
                 tid_lookup.insert(name.to_string(), tid);
+                contig_names.push(name.to_string());
+            } else {
+                contig_names.push(String::from("unknown"));
             }
         }
 
@@ -51,10 +55,15 @@ impl OptimizedChunkProcessor {
             config,
             barcode_processor,
             tid_lookup,
+            contig_names: Arc::new(contig_names),
             count_capacity_hint,
             umi_capacity_hint,
             reader_pool: Mutex::new(Vec::new()),
         })
+    }
+
+    pub fn contig_names(&self) -> Arc<Vec<String>> {
+        Arc::clone(&self.contig_names)
     }
 
     pub fn process_chunk(&self, chunk: &PositionChunk) -> Result<Vec<PositionData>> {
@@ -103,9 +112,9 @@ impl OptimizedChunkProcessor {
         let mut chunk_results = Vec::with_capacity(chunk.positions.len());
         let mut position_index = 0usize;
 
-        let mut counts: FxHashMap<String, StrandBaseCounts> = FxHashMap::default();
+    let mut counts: FxHashMap<u32, StrandBaseCounts> = FxHashMap::default();
         counts.reserve(self.count_capacity_hint);
-        let mut umi_consensus: FxHashMap<(String, String), u8> = FxHashMap::default();
+    let mut umi_consensus: FxHashMap<(u32, String), u8> = FxHashMap::default();
         umi_consensus.reserve(self.umi_capacity_hint);
 
         let mut pileups = reader.pileup();
@@ -154,14 +163,16 @@ impl OptimizedChunkProcessor {
                     continue;
                 }
 
-                let cell_barcode =
-                    match decode_cell_barcode(&record, self.config.cell_barcode_tag.as_bytes())? {
-                        Some(barcode) => barcode,
+                let cell_id = match decode_cell_barcode(
+                    &record,
+                    self.config.cell_barcode_tag.as_bytes(),
+                )? {
+                    Some(barcode) => match self.barcode_processor.id_of(&barcode) {
+                        Some(id) => id,
                         None => continue,
-                    };
-                if !self.barcode_processor.is_valid(&cell_barcode) {
-                    continue;
-                }
+                    },
+                    None => continue,
+                };
 
                 let umi = match decode_umi(&record, self.config.umi_tag.as_bytes())? {
                     Some(umi) => umi,
@@ -171,7 +182,7 @@ impl OptimizedChunkProcessor {
                 if let Some(encoded) = encode_call(self.config.stranded, base, record.is_reverse())
                 {
                     umi_consensus
-                        .entry((cell_barcode, umi))
+                        .entry((cell_id, umi))
                         .and_modify(|existing| {
                             if *existing != encoded {
                                 *existing = UMI_CONFLICT_CODE;
@@ -184,25 +195,21 @@ impl OptimizedChunkProcessor {
             let current_index = position_index;
             position_index += 1;
 
-            for ((cell_barcode, _umi), encoded) in umi_consensus.drain() {
+            for ((cell_id, _umi), encoded) in umi_consensus.drain() {
                 if encoded == UMI_CONFLICT_CODE {
                     continue;
                 }
 
-                let counts_entry = counts.entry(cell_barcode).or_default();
+                let counts_entry = counts.entry(cell_id).or_default();
 
                 apply_encoded_call(self.config.stranded, encoded, counts_entry);
             }
 
-            let mut position_counts: HashMap<String, StrandBaseCounts> =
-                HashMap::with_capacity(counts.len());
-            position_counts.extend(counts.drain());
-
             let position_meta = &chunk.positions[current_index];
             chunk_results.push(PositionData {
-                chrom: position_meta.chrom.clone(),
+                contig_id: tid,
                 pos: position_meta.pos,
-                counts: position_counts,
+                counts: counts.drain().collect(),
             });
         }
 

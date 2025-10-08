@@ -63,6 +63,8 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
         ));
     }
 
+    let manifest_positions = positions.len();
+
     let chunk_size = args.chunk_size();
     let chunk_size_max_depth = args.chunk_size_max_depth();
     let adata_config = AnnDataConfig {
@@ -72,6 +74,8 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
         chunk_size,
         matrix_density: args.matrix_density,
         batch_size: chunk_size,
+        total_positions: manifest_positions,
+        triplet_spill_nnz: (chunk_size as usize * 32).max(500_000),
     };
 
     let processor_config = BamProcessorConfig {
@@ -95,8 +99,12 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     let chunks = chunk_positions(positions, chunk_size, chunk_size_max_depth);
     info!("Chunked positions into {} batches", chunks.len());
 
-    let processor =
-        OptimizedChunkProcessor::new(args.bam.clone(), processor_config, barcode_processor)?;
+    let processor = OptimizedChunkProcessor::new(
+        args.bam.clone(),
+        processor_config,
+        Arc::clone(&barcode_processor),
+    )?;
+    let contig_names = processor.contig_names();
 
     info!("Processing chunks in parallel with streaming AnnData conversion...");
     let processing_start = Instant::now();
@@ -108,7 +116,11 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     let channel_capacity = usize::max(active_threads.saturating_mul(2), 1);
     let (sender, receiver) = bounded(channel_capacity);
     let output_path = args.output.clone();
-    let converter = AnnDataConverter::new(adata_config);
+    let converter = AnnDataConverter::new(
+        adata_config,
+        Arc::clone(&barcode_processor),
+        contig_names,
+    );
 
     let writer_handle = thread::spawn(move || -> Result<()> {
         info!(
