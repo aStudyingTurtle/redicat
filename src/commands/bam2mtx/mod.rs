@@ -142,19 +142,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     chunks.into_par_iter().enumerate().try_for_each_init(
         || sender_clone.clone(),
         |tx, (idx, chunk)| -> Result<()> {
-            // Log chunk statistics for monitoring
-            let high_depth_count = chunk.positions.iter().filter(|p| p.near_max_depth).count();
-            let total_weight: usize = chunk.positions.iter()
-                .map(|p| p.depth as usize)
-                .sum();
-            
-            info!(
-                "Processing chunk {} (positions: {}, high-depth: {}, total weight: {})",
-                idx,
-                chunk.positions.len(),
-                high_depth_count,
-                total_weight
-            );
+            // ...existing code...
 
             let data = processor.process_chunk(&chunk)?;
             let chunk_positions = data.len();
@@ -165,8 +153,8 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
             }
 
             let completed = processed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
-            if completed == total_chunks || completed.is_multiple_of(log_step) {
-                let percent = (completed as f64 / total_chunks.max(1) as f64) * 100.0;
+            let percent = (completed as f64 / total_chunks.max(1) as f64) * 100.0;
+            if completed == total_chunks || (percent >= 5.0 && ((percent / 5.0).fract() == 0.0)) {
                 info!(
                     "Processed {:.1}% ({} / {} chunks)",
                     percent, completed, total_chunks
