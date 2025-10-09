@@ -75,7 +75,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
         matrix_density: args.matrix_density,
         batch_size: chunk_size,
         total_positions: manifest_positions,
-        triplet_spill_nnz: (chunk_size as usize * 32).max(500_000),
+        triplet_spill_nnz: (chunk_size as usize * 2).max(100_000),  // More aggressive: reduced multiplier from 32 to 2, min from 500k to 100k
     };
 
     let processor_config = BamProcessorConfig {
@@ -142,10 +142,24 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     chunks.into_par_iter().enumerate().try_for_each_init(
         || sender_clone.clone(),
         |tx, (idx, chunk)| -> Result<()> {
-                let data = processor.process_chunk(&chunk)?;
-                let chunk_positions = data.len();
-                if chunk_positions > 0 {
-                    tx.send(data)
+            // Log chunk statistics for monitoring
+            let high_depth_count = chunk.positions.iter().filter(|p| p.near_max_depth).count();
+            let total_weight: usize = chunk.positions.iter()
+                .map(|p| p.depth as usize)
+                .sum();
+            
+            info!(
+                "Processing chunk {} (positions: {}, high-depth: {}, total weight: {})",
+                idx,
+                chunk.positions.len(),
+                high_depth_count,
+                total_weight
+            );
+
+            let data = processor.process_chunk(&chunk)?;
+            let chunk_positions = data.len();
+            if chunk_positions > 0 {
+                tx.send(data)
                     .map_err(|err| anyhow!("failed to send chunk {idx}: {err}"))?;
                 total_positions.fetch_add(chunk_positions, Ordering::Relaxed);
             }

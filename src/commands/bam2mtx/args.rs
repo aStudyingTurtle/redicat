@@ -90,8 +90,8 @@ pub struct Bam2MtxArgs {
     pub chunksize: u32,
 
     /// Chunk size applied to high-depth loci marked by `NEAR_MAX_DEPTH` in the TSV.
-    /// Default: 3
-    #[structopt(long = "chunk-size-max-depth", default_value = "3")]
+    /// Default: 1
+    #[structopt(long = "chunk-size-max-depth", default_value = "1")]
     pub chunk_size_max_depth: u32,
 
     /// Matrix density estimate used to pre-size sparse buffers.

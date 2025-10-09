@@ -13,6 +13,7 @@ use std::sync::Arc;
 use super::input::PositionChunk;
 
 /// Chunk processor with aggressive reuse of BAM readers and pre-sized hash maps.
+/// Now includes UMI string interning to reduce memory usage.
 pub struct OptimizedChunkProcessor {
     bam_path: PathBuf,
     config: BamProcessorConfig,
@@ -22,6 +23,7 @@ pub struct OptimizedChunkProcessor {
     count_capacity_hint: usize,
     umi_capacity_hint: usize,
     reader_pool: Mutex<Vec<bam::IndexedReader>>,
+    umi_interner: Arc<Mutex<FxHashMap<String, Arc<str>>>>,
 }
 
 impl OptimizedChunkProcessor {
@@ -59,6 +61,7 @@ impl OptimizedChunkProcessor {
             count_capacity_hint,
             umi_capacity_hint,
             reader_pool: Mutex::new(Vec::new()),
+            umi_interner: Arc::new(Mutex::new(FxHashMap::default())),
         })
     }
 
@@ -112,10 +115,23 @@ impl OptimizedChunkProcessor {
         let mut chunk_results = Vec::with_capacity(chunk.positions.len());
         let mut position_index = 0usize;
 
-    let mut counts: FxHashMap<u32, StrandBaseCounts> = FxHashMap::default();
-        counts.reserve(self.count_capacity_hint);
-    let mut umi_consensus: FxHashMap<(u32, String), u8> = FxHashMap::default();
-        umi_consensus.reserve(self.umi_capacity_hint);
+        // Improved HashMap capacity estimation based on chunk characteristics
+        let has_high_depth = chunk.positions.iter().any(|p| p.near_max_depth);
+        let estimated_count_capacity = if has_high_depth {
+            self.count_capacity_hint.min(5_000)
+        } else {
+            self.count_capacity_hint
+        };
+        let estimated_umi_capacity = if has_high_depth {
+            self.umi_capacity_hint.min(50_000)
+        } else {
+            self.umi_capacity_hint
+        };
+
+        let mut counts: FxHashMap<u32, StrandBaseCounts> = 
+            FxHashMap::with_capacity_and_hasher(estimated_count_capacity, Default::default());
+        let mut umi_consensus: FxHashMap<(u32, Arc<str>), u8> = 
+            FxHashMap::with_capacity_and_hasher(estimated_umi_capacity, Default::default());
 
         let mut pileups = reader.pileup();
         pileups.set_max_depth(self.config.max_depth.min(i32::MAX as u32));
@@ -179,10 +195,19 @@ impl OptimizedChunkProcessor {
                     None => continue,
                 };
 
+                // Intern UMI string to reduce memory usage
+                let umi_arc = {
+                    let mut interner = self.umi_interner.lock();
+                    interner
+                        .entry(umi.clone())
+                        .or_insert_with(|| Arc::from(umi.as_str()))
+                        .clone()
+                };
+
                 if let Some(encoded) = encode_call(self.config.stranded, base, record.is_reverse())
                 {
                     umi_consensus
-                        .entry((cell_id, umi))
+                        .entry((cell_id, umi_arc))
                         .and_modify(|existing| {
                             if *existing != encoded {
                                 *existing = UMI_CONFLICT_CODE;

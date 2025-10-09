@@ -52,7 +52,7 @@ impl Default for AnnDataConfig {
             chunk_size: 15_000,
             matrix_density: 0.005,
             batch_size: 2_500,
-            triplet_spill_nnz: 500_000,
+            triplet_spill_nnz: 100_000,  // More aggressive: reduced from 500_000 to 100_000
             total_positions: 0,
         }
     }
@@ -344,7 +344,8 @@ impl StreamingMatrixBuilder {
         }
 
         self.pending_triplets += added;
-        if self.pending_triplets >= self.spill_threshold {
+        // More aggressive spilling: use lower threshold and check more frequently
+        if self.pending_triplets >= self.spill_threshold.min(50_000) {
             self.flush_triplets()?;
         }
         Ok(())
