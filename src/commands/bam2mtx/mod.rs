@@ -75,7 +75,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
         matrix_density: args.matrix_density,
         batch_size: chunk_size,
         total_positions: manifest_positions,
-        triplet_spill_nnz: (chunk_size as usize * 2).max(100_000),  // More aggressive: reduced multiplier from 32 to 2, min from 500k to 100k
+        triplet_spill_nnz: (chunk_size as usize * 2).max(100_000), // More aggressive: reduced multiplier from 32 to 2, min from 500k to 100k
     };
 
     let processor_config = BamProcessorConfig {
@@ -111,16 +111,13 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     let total_chunks = chunks.len();
     let processed_chunks = AtomicUsize::new(0);
     let total_positions = AtomicUsize::new(0);
-    let log_step = usize::max(1, total_chunks.max(1) / 10);
+    let log_step = usize::max(1, total_chunks.max(1) / 20);
 
     let channel_capacity = usize::max(active_threads.saturating_mul(2), 1);
     let (sender, receiver) = bounded(channel_capacity);
     let output_path = args.output.clone();
-    let converter = AnnDataConverter::new(
-        adata_config,
-        Arc::clone(&barcode_processor),
-        contig_names,
-    );
+    let converter =
+        AnnDataConverter::new(adata_config, Arc::clone(&barcode_processor), contig_names);
 
     let writer_handle = thread::spawn(move || -> Result<()> {
         info!(
@@ -154,7 +151,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
 
             let completed = processed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
             let percent = (completed as f64 / total_chunks.max(1) as f64) * 100.0;
-            if completed == total_chunks || (percent >= 5.0 && ((percent / 5.0).fract() == 0.0)) {
+            if completed == total_chunks || completed.is_multiple_of(log_step) {
                 info!(
                     "Processed {:.1}% ({} / {} chunks)",
                     percent, completed, total_chunks
