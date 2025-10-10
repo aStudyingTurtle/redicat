@@ -75,7 +75,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
         matrix_density: args.matrix_density,
         batch_size: chunk_size,
         total_positions: manifest_positions,
-        triplet_spill_nnz: (chunk_size as usize * 2).max(100_000), // More aggressive: reduced multiplier from 32 to 2, min from 500k to 100k
+        triplet_spill_nnz: (chunk_size as usize * 16).max(500_000),
     };
 
     let processor_config = BamProcessorConfig {
