@@ -16,7 +16,6 @@ pub struct BaseProcessor {
     reads: PathBuf,
     coord_base: u32,
     max_depth: u32,
-    skip_max_depth: u32,
     min_depth: u32,
     max_n_fraction: u32,
     min_baseq: Option<u8>,
@@ -33,19 +32,10 @@ impl BaseProcessor {
         read_filter: Arc<DefaultReadFilter>,
         allowed_tids: Option<FxHashSet<u32>>,
     ) -> Self {
-        // Apply the logic: if skip_max_depth exists and is less than 2,000,000,000,
-        // then max_depth is set to skip_max_depth + 1000
-        let adjusted_max_depth = if config.skip_max_depth < 2_000_000_000 {
-            config.skip_max_depth + 1000
-        } else {
-            config.max_depth
-        };
-
         Self {
             reads: config.reads.clone(),
             coord_base: config.coord_offset,
-            max_depth: adjusted_max_depth,
-            skip_max_depth: config.skip_max_depth,
+            max_depth: config.max_depth,
             min_depth: config.min_depth,
             max_n_fraction: config.max_n_fraction,
             min_baseq: config.min_baseq.or(Some(30)),
@@ -104,10 +94,6 @@ impl RegionProcessor for BaseProcessor {
             );
             pos.pos += self.coord_base;
             pos.mark_near_max_depth(self.max_depth);
-
-            if pos.depth > self.skip_max_depth {
-                continue;
-            }
 
             let should_include = if self.edited_mode {
                 let valid_value = max(pos.depth / self.editing_threshold, 2);
@@ -170,7 +156,6 @@ mod tests {
             mapquality: 255,
             coord_offset: 1,
             max_depth: 10_000,
-            skip_max_depth: u32::MAX,
             min_depth: 10,
             max_n_fraction: 20,
             report_all: true,

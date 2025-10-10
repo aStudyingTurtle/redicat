@@ -37,7 +37,6 @@ fn run_bulk_first_pass(args: &Bam2MtxArgs, target: &Path) -> Result<()> {
         mapquality: args.min_mapq,
         zero_base: false,
         max_depth: 8000,
-        skip_max_depth: args.skip_max_depth,
         min_depth: args.min_depth,
         max_n_fraction: args.max_n_fraction,
         all: false,

@@ -202,7 +202,7 @@ impl SparseOps {
     }
 
     /// Element-wise multiplication using optimized two-pointer algorithm for sparse matrices
-    /// 
+    ///
     /// This implementation uses a sorted two-pointer merge algorithm which is significantly
     /// faster than HashMap-based intersection for sparse matrices. CSR format guarantees
     /// column indices are already sorted within each row, allowing O(nnz_a + nnz_b) complexity

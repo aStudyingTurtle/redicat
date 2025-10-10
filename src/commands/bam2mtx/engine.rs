@@ -12,6 +12,14 @@ use std::sync::Arc;
 
 use super::input::PositionChunk;
 
+/// Metadata for genomic sites skipped due to exceeding the configured depth ceiling.
+#[derive(Debug, Clone)]
+pub struct SkippedSite {
+    pub contig: String,
+    pub pos: u64,
+    pub depth: u32,
+}
+
 /// Chunk processor with aggressive reuse of BAM readers and pre-sized hash maps.
 /// Now includes UMI string interning to reduce memory usage.
 pub struct OptimizedChunkProcessor {
@@ -69,9 +77,12 @@ impl OptimizedChunkProcessor {
         Arc::clone(&self.contig_names)
     }
 
-    pub fn process_chunk(&self, chunk: &PositionChunk) -> Result<Vec<PositionData>> {
-        if chunk.positions.is_empty() {
-            return Ok(Vec::new());
+    pub fn process_chunk(
+        &self,
+        chunk: &PositionChunk,
+    ) -> Result<(Vec<PositionData>, Vec<SkippedSite>)> {
+        if chunk.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
         }
 
         let mut reader = {
@@ -89,7 +100,7 @@ impl OptimizedChunkProcessor {
             None => {
                 let mut pool = self.reader_pool.lock();
                 pool.push(reader);
-                return Ok(Vec::new());
+                return Ok((Vec::new(), Vec::new()));
             }
         };
 
@@ -112,11 +123,12 @@ impl OptimizedChunkProcessor {
             .map(|p| p.pos.saturating_sub(1) as u32)
             .collect();
 
-        let mut chunk_results = Vec::with_capacity(chunk.positions.len());
+        let mut chunk_results = Vec::with_capacity(chunk.len());
+        let mut skipped_sites: Vec<SkippedSite> = Vec::new();
         let mut position_index = 0usize;
 
         // Improved HashMap capacity estimation based on chunk characteristics
-        let has_high_depth = chunk.positions.iter().any(|p| p.near_max_depth);
+        let has_high_depth = chunk.near_max_depth_count() > 0;
         let estimated_count_capacity = if has_high_depth {
             self.count_capacity_hint.min(5_000)
         } else {
@@ -128,9 +140,9 @@ impl OptimizedChunkProcessor {
             self.umi_capacity_hint
         };
 
-        let mut counts: FxHashMap<u32, StrandBaseCounts> = 
+        let mut counts: FxHashMap<u32, StrandBaseCounts> =
             FxHashMap::with_capacity_and_hasher(estimated_count_capacity, Default::default());
-        let mut umi_consensus: FxHashMap<(u32, Arc<str>), u8> = 
+        let mut umi_consensus: FxHashMap<(u32, Arc<str>), u8> =
             FxHashMap::with_capacity_and_hasher(estimated_umi_capacity, Default::default());
 
         let mut pileups = reader.pileup();
@@ -151,6 +163,20 @@ impl OptimizedChunkProcessor {
             }
 
             if target_positions[position_index] != pile_pos {
+                continue;
+            }
+
+            let current_index = position_index;
+            position_index += 1;
+
+            let depth = pileup.depth() as u32;
+            if depth >= self.config.max_depth {
+                let position_meta = &chunk.positions[current_index];
+                skipped_sites.push(SkippedSite {
+                    contig: position_meta.chrom.clone(),
+                    pos: position_meta.pos,
+                    depth,
+                });
                 continue;
             }
 
@@ -179,16 +205,14 @@ impl OptimizedChunkProcessor {
                     continue;
                 }
 
-                let cell_id = match decode_cell_barcode(
-                    &record,
-                    self.config.cell_barcode_tag.as_bytes(),
-                )? {
-                    Some(barcode) => match self.barcode_processor.id_of(&barcode) {
-                        Some(id) => id,
+                let cell_id =
+                    match decode_cell_barcode(&record, self.config.cell_barcode_tag.as_bytes())? {
+                        Some(barcode) => match self.barcode_processor.id_of(&barcode) {
+                            Some(id) => id,
+                            None => continue,
+                        },
                         None => continue,
-                    },
-                    None => continue,
-                };
+                    };
 
                 let umi = match decode_umi(&record, self.config.umi_tag.as_bytes())? {
                     Some(umi) => umi,
@@ -217,9 +241,6 @@ impl OptimizedChunkProcessor {
                 }
             }
 
-            let current_index = position_index;
-            position_index += 1;
-
             for ((cell_id, _umi), encoded) in umi_consensus.drain() {
                 if encoded == UMI_CONFLICT_CODE {
                     continue;
@@ -243,6 +264,6 @@ impl OptimizedChunkProcessor {
             pool.push(reader);
         }
 
-        Ok(chunk_results)
+        Ok((chunk_results, skipped_sites))
     }
 }

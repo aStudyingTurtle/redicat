@@ -23,6 +23,24 @@ pub struct GenomicPosition {
 #[derive(Debug, Clone)]
 pub struct PositionChunk {
     pub positions: Vec<GenomicPosition>,
+    pub near_max_depth_count: usize,
+}
+
+impl PositionChunk {
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.positions.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.positions.is_empty()
+    }
+
+    #[inline]
+    pub fn near_max_depth_count(&self) -> usize {
+        self.near_max_depth_count
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -222,17 +240,23 @@ pub fn chunk_positions(
     let flush_current = |chunks: &mut Vec<PositionChunk>,
                          chunk: &mut Vec<GenomicPosition>,
                          weight: &mut usize,
-                         chrom: &mut Option<String>| {
+                         chrom: &mut Option<String>,
+                         near_count: &mut usize| {
         if chunk.is_empty() {
             return;
         }
+        let near_total = *near_count;
         chunks.push(PositionChunk {
             positions: std::mem::take(chunk),
+            near_max_depth_count: near_total,
         });
         chunk.reserve(base_capacity);
         *weight = 0;
         *chrom = None;
+        *near_count = 0;
     };
+
+    let mut current_near: usize = 0;
 
     for position in positions.into_iter() {
         let position_kind = if position.near_max_depth {
@@ -251,12 +275,17 @@ pub fn chunk_positions(
                 &mut current_chunk,
                 &mut current_weight,
                 &mut current_chrom,
+                &mut current_near,
             );
         }
 
         if current_chunk.is_empty() {
             current_kind = position_kind;
             current_chrom = Some(position.chrom.clone());
+        }
+
+        if position.near_max_depth {
+            current_near = current_near.saturating_add(1);
         }
 
         // Calculate the weight for this position: DEPTH + INS + DEL + REF_SKIP + FAIL
@@ -282,6 +311,7 @@ pub fn chunk_positions(
                         &mut current_chunk,
                         &mut current_weight,
                         &mut current_chrom,
+                        &mut current_near,
                     );
                 }
             }
@@ -292,6 +322,7 @@ pub fn chunk_positions(
                         &mut current_chunk,
                         &mut current_weight,
                         &mut current_chrom,
+                        &mut current_near,
                     );
                 }
             }
@@ -304,6 +335,7 @@ pub fn chunk_positions(
             &mut current_chunk,
             &mut current_weight,
             &mut current_chrom,
+            &mut current_near,
         );
     }
 
@@ -404,12 +436,15 @@ mod tests {
         let chunks = chunk_positions(positions, 4, 2);
 
         for chunk in &chunks {
+            let computed_near = chunk.positions.iter().filter(|p| p.near_max_depth).count();
+            assert_eq!(chunk.near_max_depth_count(), computed_near);
             if chunk.positions.iter().any(|p| p.near_max_depth) {
                 assert!(chunk.positions.len() <= 2);
                 assert!(chunk
                     .positions
                     .iter()
                     .all(|position| position.near_max_depth));
+                assert_eq!(chunk.near_max_depth_count(), chunk.positions.len());
             } else {
                 let total_weight: usize = chunk
                     .positions
@@ -417,6 +452,7 @@ mod tests {
                     .map(|p| (p.depth + p.ins + p.del + p.ref_skip + p.fail) as usize)
                     .sum();
                 assert!(total_weight <= 4);
+                assert_eq!(chunk.near_max_depth_count(), 0);
             }
         }
     }
@@ -470,6 +506,8 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].positions.len(), 2); // First two positions: weight 6 + 4 = 10
         assert_eq!(chunks[1].positions.len(), 2); // Last two positions: weight 5 + 7 = 12
+        assert_eq!(chunks[0].near_max_depth_count(), 0);
+        assert_eq!(chunks[1].near_max_depth_count(), 0);
 
         let first_weights: usize = chunks[0]
             .positions

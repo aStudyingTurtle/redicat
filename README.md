@@ -16,6 +16,8 @@ If REDICAT supports your research, please cite:
 - **Dynamic Rayon work queue:** `ParGranges` now flattens genomic tiles into a global work queue so `bulk` keeps every core busy even when only a handful of contigs remain in flight.
 - **Streaming AnnData assembly:** `bam2mtx` pushes chunk results through a bounded channel into a streaming sparse converter, so `.h5ad` generation no longer requires buffering millions of `PositionData` structs in RAM.
 - **Depth-aware chunking:** `bam2mtx` streams TSV manifests with Polars, accumulates position weights (`DEPTH + INS + DEL + REF_SKIP + FAIL`) until the `--chunksize` budget is spent, and automatically falls back to the narrow `--chunk-size-max-depth` batches whenever `NEAR_MAX_DEPTH=true`.
+- **Local-time observability:** Console logs now emit system time zone timestamps and 30-minute status beacons that report remaining chunks alongside outstanding `NEAR_MAX_DEPTH` loci for long-running jobs.
+- **Depth-cap skip audit:** Any site whose pileup depth meets or exceeds `--max-depth` is skipped before UMI aggregation, recorded to a sibling `<name>_skiped_sites.txt` manifest, and summarised in the final log output for easy triage.
 - **Layered architecture:** The library is split into `core` (shared utilities & sparse ops), `engine` (parallel schedulers and position primitives), and `pipeline` (bam2mtx & call workflows), keeping reusable pieces lightweight and testable.
 - **Sparse-first analytics:** All matrix work is written against CSR matrices with adaptive density hints so memory usage tracks the number of edited positions, not the theoretical genome size.
 - **Optimized sparse operations:** Uses two-pointer algorithms for sparse matrix operations (O(nnz) complexity) instead of HashMap-based approaches, with SmallVec for temporary allocations and FxHashMap for faster non-cryptographic hashing.
@@ -75,7 +77,7 @@ Add `--allcontigs` to any command that should consider every contig in the BAM h
 
 ## Subcommands
 ### `bulk`
-Calculates per-base depth and nucleotide counts across a BAM/CRAM. Filtering options allow you to tune MAPQ, base quality, minimum depth, and an editing-specific heuristic. The revamped scheduler flattens genomic tiles into a unified Rayon work queue and forces small stealable tasks via `with_min_len(1)` + adaptive `with_max_len`, keeping CPU utilisation high for long-running bulk traversals. When `--skip-max-depth` is set to a value less than 2,000,000,000, the `--max-depth` value is automatically adjusted to `--skip-max-depth + 1000`. Results stream to a bgzip-compressed TSV.
+Calculates per-base depth and nucleotide counts across a BAM/CRAM. Filtering options allow you to tune MAPQ, base quality, minimum depth, and an editing-specific heuristic. The revamped scheduler flattens genomic tiles into a unified Rayon work queue and forces small stealable tasks via `with_min_len(1)` + adaptive `with_max_len`, keeping CPU utilisation high for long-running bulk traversals. Results stream to a bgzip-compressed TSV with near-max-depth flags computed from the observed post-filter depth.
 `near_max_depth` flags now key off the observed (post-filter) depth, ensuring the 1% ceiling matches the pileup depth returned by htslib after read rejection.
 Some libraries of `bulk` were taken form the [`perbase`](https://github.com/sstadick/perbase) project.
 
@@ -90,8 +92,7 @@ Option reference:
 | `-Q`  | `--min-baseq`         | Base-quality floor; lower bases counted as `N`.       | `30 (implicit)` |
 | `-q`  | `--mapquality`        | Minimum mapping quality accepted.                     | `255`           |
 | `-z`  | `--zero-base`         | Emit 0-based coordinates instead of 1-based.          | `false`         |
-| `-D`  | `--max-depth`         | Depth ceiling; near-max flagged as suspect. When `--skip-max-depth` is set to a value less than 2,000,000,000, this value is automatically set to `--skip-max-depth + 1000`. | `8000`          |
-| `-s`/`-sD` | `--skip-max-depth`    | Skip sites whose observed depth exceeds this limit.    | `2147483647`    |
+| `-D`  | `--max-depth`         | Depth ceiling; positions within 1% of the cap are flagged as `NEAR_MAX_DEPTH`. | `8000`          |
 | `-d`  | `--min-depth`         | Minimum coverage required to report a site.           | `10`            |
 | `-n`  | `--max-n-fraction`    | Maximum tolerated N fraction (depth / value).         | `20`            |
 | `-a`  | `--all`               | Report all sites rather than editing-enriched subset. | `false`         |
@@ -100,6 +101,8 @@ Option reference:
 
 ### `bam2mtx`
 Converts barcoded BAMs into sparse AnnData matrices (per base, per barcode, strand-aware). Accepts precomputed site lists or can bootstrap one via `--two-pass`, which internally runs `bulk` with the same contour filters. Parallel chunk workers now stream their results through a bounded crossbeam channel into the AnnData writer, eliminating the previous end-of-run aggregation penalty and keeping memory bounded by the active chunk.
+
+During long conversions the console prints system-local timestamps and, every ~30 minutes, a status snapshot summarising remaining chunks and unprocessed `NEAR_MAX_DEPTH` loci so operators can watch backlog decay in real time. At completion the command emits a `<output>_skiped_sites.txt` sibling file listing the contig, 1-based position, and observed depth of every locus that was skipped because its pileup depth met or exceeded `--max-depth`.
 
 **Recent Memory Optimizations (v0.3.1):**
 - **UMI String Interning**: Identical UMI sequences are now deduplicated in memory using `Arc<str>`, reducing memory usage by 50-70% for high-depth positions with redundant UMIs.
@@ -130,8 +133,7 @@ Option reference:
 | `-d`  | `--min-depth`         | Minimum non-`N` coverage to keep a site.                       | `10`     |
 | `-n`  | `--max-n-fraction`    | Maximum tolerated ambiguous fraction (depth / value).          | `20`     |
 | `-et` | `--editing-threshold` | Ensures at least two bases exceed `depth / editing-threshold`. | `1000`   |
-| `-D`  | `--max-depth`         | Cap on pileup traversal depth during matrix assembly.         | `50000`  |
-| `-s`/`-sD` | `--skip-max-depth`    | Threshold passed to the first-pass `bulk` run in `--two-pass` mode to drop oversaturated sites. | `2147483647`  |
+| `-D`  | `--max-depth`         | Cap on pileup traversal depth during matrix assembly (default 65,536). Sites with depth ≥ cap are skipped, logged, and mirrored to `<output>_skiped_sites.txt`.         | `65536`  |
 | `-S`  | `--stranded`          | Treat UMIs as strand-aware.                                    | `false`  |
 | —     | `--umi-tag`           | BAM tag containing UMI sequence.                               | `UB`     |
 | —     | `--cb-tag`            | BAM tag containing cell barcode.                               | `CB`     |
@@ -157,7 +159,7 @@ Important options:
 - **Reader pooling:** Each worker thread checks out an `IndexedReader` from a pool, avoiding reopen/seek penalties when iterating across genomic tiles.
 - **Triplet batching:** Sparse matrices are assembled from thread-local batches of `(row, col, value)` triplets, eliminating cross-thread contention, and the streaming writer drains them via bounded channels to keep peak memory low.
 - **Adaptive chunking:** Dual CLI knobs (`--chunksize` for the depth-weighted standard loci budget and `--chunk-size-max-depth` for hotspot batch caps, now defaulting to 1) govern the parallel granularity for `bam2mtx` (and the batch size for AnnData writes), while the refactored `ParGranges` scheduler flattens tiles into a single Rayon queue so `bulk` honors `--chunksize` without serial bottlenecks.
-- **Chunk-level fetch & depth guards:** `bam2mtx` batches contiguous sites per contig, records observed depth, and—in `--two-pass` mode—relies on the first-pass `bulk` run (honoring `--skip-max-depth`) to prune oversaturated loci before dense pileups reach the matrix stage.
+- **Chunk-level fetch & depth guards:** `bam2mtx` batches contiguous sites per contig, records observed depth, and—in `--two-pass` mode—relies on a first-pass `bulk` run capped at `--max-depth 8000` plus in-run pileup guards to prune oversaturated loci before dense pileups reach the matrix stage.
 - **Progress-aware logging:** Chunk processors emit periodic `%` complete + ETA updates plus detailed per-chunk statistics so multi-hour conversions remain easy to follow from the console.
 
 ## Testing & Data

@@ -445,17 +445,20 @@ impl StreamingMatrixBuilder {
             return Ok(());
         }
 
-        for (buffer, spool) in self.forward_buffers.iter_mut().zip(self.forward_spools.iter_mut()) {
+        for (buffer, spool) in self
+            .forward_buffers
+            .iter_mut()
+            .zip(self.forward_spools.iter_mut())
+        {
             if !buffer.is_empty() {
                 spool.append(buffer)?;
                 buffer.clear();
             }
         }
 
-        if let (Some(buffers), Some(spools)) = (
-            self.reverse_buffers.as_mut(),
-            self.reverse_spools.as_mut(),
-        ) {
+        if let (Some(buffers), Some(spools)) =
+            (self.reverse_buffers.as_mut(), self.reverse_spools.as_mut())
+        {
             for (buffer, spool) in buffers.iter_mut().zip(spools.iter_mut()) {
                 if !buffer.is_empty() {
                     spool.append(buffer)?;
@@ -480,7 +483,12 @@ impl StreamingMatrixBuilder {
     }
 }
 
-fn append_counts(buffers: &mut [Vec<Triplet>; 4], cell_id: u32, column: u32, counts: BaseCounts) -> usize {
+fn append_counts(
+    buffers: &mut [Vec<Triplet>; 4],
+    cell_id: u32,
+    column: u32,
+    counts: BaseCounts,
+) -> usize {
     let mut added = 0usize;
     if counts.a > 0 {
         buffers[0].push(Triplet {
@@ -615,11 +623,7 @@ mod tests {
         }
     }
 
-    fn position(
-        contig_id: u32,
-        pos: u64,
-        entries: Vec<(u32, StrandBaseCounts)>,
-    ) -> PositionData {
+    fn position(contig_id: u32, pos: u64, entries: Vec<(u32, StrandBaseCounts)>) -> PositionData {
         let mut counts: FxHashMap<u32, StrandBaseCounts> = FxHashMap::default();
         for (cell, value) in entries {
             counts.insert(cell, value);
@@ -683,7 +687,10 @@ mod tests {
         }
 
         let parts = builder.finalize()?;
-        assert_eq!(parts.cell_names, vec!["AAAC".to_string(), "GGGG".to_string()]);
+        assert_eq!(
+            parts.cell_names,
+            vec!["AAAC".to_string(), "GGGG".to_string()]
+        );
         assert_eq!(
             parts.position_names,
             vec!["chr1:1".to_string(), "chr1:2".to_string()]

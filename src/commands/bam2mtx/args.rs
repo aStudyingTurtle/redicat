@@ -53,25 +53,9 @@ pub struct Bam2MtxArgs {
     #[structopt(long, short = "S")]
     pub stranded: bool,
 
-    // /// Maximum pileup depth to examine per site.
-    // #[structopt(long = "max-depth", default_value = "2147483647", short = "D")]
-    // pub max_depth: u32,
-    #[structopt(
-        long = "max-depth",
-        default_value = "2147483647",
-        short = "D",
-        hidden = true
-    )]
+    /// Maximum pileup depth to examine per site.
+    #[structopt(long = "max-depth", default_value = "65536", short = "D")]
     pub max_depth: u32,
-
-    /// Skip sites whose observed depth exceeds this threshold when generating first-pass sites (`--two-pass`).
-    #[structopt(
-        long = "skip-max-depth",
-        short = "s",
-        visible_alias = "sD",
-        default_value = "2147483647"
-    )]
-    pub skip_max_depth: u32,
 
     /// UMI tag name.
     #[structopt(long, default_value = "UB")]
@@ -139,8 +123,8 @@ mod tests {
         assert_eq!(args.tsv, Some(PathBuf::from("test.tsv")));
         assert_eq!(args.barcodes, PathBuf::from("barcodes.tsv"));
         assert_eq!(args.output, PathBuf::from("output.h5ad"));
-        assert_eq!(args.skip_max_depth, i32::MAX as u32);
-    assert_eq!(args.chunk_size_max_depth, 3);
+        assert_eq!(args.max_depth, 65_536);
+        assert_eq!(args.chunk_size_max_depth, 1);
         assert!(!args.two_pass);
     }
 }

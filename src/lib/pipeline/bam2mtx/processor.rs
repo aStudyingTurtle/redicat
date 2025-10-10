@@ -160,8 +160,6 @@ pub struct BamProcessorConfig {
     pub stranded: bool,
     /// Maximum pileup depth to examine per genomic position
     pub max_depth: u32,
-    /// Threshold for skipping sites when depth is excessive (handled upstream)
-    pub skip_max_depth: u32,
     /// Tag name for UMI (Unique Molecular Identifier)
     pub umi_tag: String,
     /// Tag name for cell barcode
@@ -177,8 +175,7 @@ impl Default for BamProcessorConfig {
             max_n_fraction: 20,
             editing_threshold: 1000,
             stranded: true,
-            max_depth: u32::MAX,
-            skip_max_depth: u32::MAX,
+            max_depth: 65_536,
             umi_tag: "UB".to_string(),
             cell_barcode_tag: "CB".to_string(),
         }
@@ -218,15 +215,19 @@ impl BamProcessor {
 
         // Fetch the region
         reader.fetch((tid, start_pos, end_pos))?;
-    let mut pileups: bam::pileup::Pileups<'_, bam::IndexedReader> = reader.pileup();
-    pileups.set_max_depth(i32::MAX as u32);
-    let mut counts: FxHashMap<u32, StrandBaseCounts> = FxHashMap::default();
-    let mut umi_consensus: FxHashMap<(u32, String), u8> = FxHashMap::default();
+        let mut pileups: bam::pileup::Pileups<'_, bam::IndexedReader> = reader.pileup();
+        pileups.set_max_depth(self.config.max_depth.min(i32::MAX as u32));
+        let mut counts: FxHashMap<u32, StrandBaseCounts> = FxHashMap::default();
+        let mut umi_consensus: FxHashMap<(u32, String), u8> = FxHashMap::default();
 
         // Process pileup
         for pileup in pileups {
             let pileup = pileup?;
             if pileup.pos() != start_pos {
+                continue;
+            }
+
+            if (pileup.depth() as u32) >= self.config.max_depth {
                 continue;
             }
 
@@ -243,16 +244,14 @@ impl BamProcessor {
                 // }
 
                 let record = read.record();
-                let cell_id = match decode_cell_barcode(
-                    &record,
-                    self.config.cell_barcode_tag.as_bytes(),
-                )? {
-                    Some(barcode) => match self.barcode_processor.id_of(&barcode) {
-                        Some(id) => id,
+                let cell_id =
+                    match decode_cell_barcode(&record, self.config.cell_barcode_tag.as_bytes())? {
+                        Some(barcode) => match self.barcode_processor.id_of(&barcode) {
+                            Some(id) => id,
+                            None => continue,
+                        },
                         None => continue,
-                    },
-                    None => continue,
-                };
+                    };
 
                 let umi = match decode_umi(&record, self.config.umi_tag.as_bytes())? {
                     Some(umi) => umi,

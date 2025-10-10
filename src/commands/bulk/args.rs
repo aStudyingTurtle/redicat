@@ -37,15 +37,6 @@ pub struct BulkArgs {
     #[structopt(long, short = "D", default_value = "8000")]
     pub max_depth: u32,
 
-    /// Skip sites whose observed depth exceeds this threshold.
-    #[structopt(
-        long = "skip-max-depth",
-        short = "s",
-        visible_alias = "sD",
-        default_value = "2147483647"
-    )]
-    pub skip_max_depth: u32,
-
     /// Minimum non-`N` depth required to report a site.
     #[structopt(long, short = "d", default_value = "10")]
     pub min_depth: u32,
@@ -78,7 +69,6 @@ pub struct BulkConfig {
     pub mapquality: u8,
     pub coord_offset: u32,
     pub max_depth: u32,
-    pub skip_max_depth: u32,
     pub min_depth: u32,
     pub max_n_fraction: u32,
     pub report_all: bool,
@@ -97,7 +87,6 @@ impl From<BulkArgs> for BulkConfig {
             mapquality: args.mapquality,
             coord_offset: if args.zero_base { 0 } else { 1 },
             max_depth: args.max_depth,
-            skip_max_depth: args.skip_max_depth,
             min_depth: args.min_depth,
             max_n_fraction: args.max_n_fraction,
             report_all: args.all,
