@@ -50,10 +50,7 @@ impl ShardedUmiInterner {
     /// Get statistics about interner usage (for debugging/monitoring).
     #[allow(dead_code)]
     fn stats(&self) -> Vec<usize> {
-        self.shards
-            .iter()
-            .map(|shard| shard.lock().len())
-            .collect()
+        self.shards.iter().map(|shard| shard.lock().len()).collect()
     }
 }
 
@@ -76,8 +73,8 @@ pub struct OptimizedChunkProcessor {
     count_capacity_hint: usize,
     umi_capacity_hint: usize,
     reader_pool: Mutex<Vec<bam::IndexedReader>>,
-    reader_pool_size: AtomicUsize,  // Lock-free size tracking
-    umi_interner: Arc<ShardedUmiInterner>,  // Sharded for reduced contention
+    reader_pool_size: AtomicUsize,         // Lock-free size tracking
+    umi_interner: Arc<ShardedUmiInterner>, // Sharded for reduced contention
 }
 
 impl OptimizedChunkProcessor {
@@ -141,9 +138,10 @@ impl OptimizedChunkProcessor {
                 r
             } else {
                 // Race condition: another thread took it, create new reader
-                drop(pool);  // Release lock before I/O
-                bam::IndexedReader::from_path(&self.bam_path)
-                    .unwrap_or_else(|e| panic!("Failed to open BAM {}: {}", self.bam_path.display(), e))
+                drop(pool); // Release lock before I/O
+                bam::IndexedReader::from_path(&self.bam_path).unwrap_or_else(|e| {
+                    panic!("Failed to open BAM {}: {}", self.bam_path.display(), e)
+                })
             }
         } else {
             // Pool is empty, create new reader without locking

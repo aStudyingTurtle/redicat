@@ -13,7 +13,7 @@ use anndata_hdf5::H5;
 use anyhow::{anyhow, Context, Result};
 use log::info;
 use nalgebra_sparse::csr::CsrMatrix;
-use rayon::prelude::*;
+use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
 use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
 use std::cmp::Reverse;
@@ -207,6 +207,7 @@ struct TripletSpool {
     runs: Vec<RunMeta>,
     bytes_written: u64,
     total: usize,
+    sort_pool: Arc<ThreadPool>,
 }
 
 struct RunMeta {
@@ -215,7 +216,7 @@ struct RunMeta {
 }
 
 impl TripletSpool {
-    fn new() -> Result<Self> {
+    fn new(sort_pool: Arc<ThreadPool>) -> Result<Self> {
         let file = NamedTempFile::new()?;
         let mut writer_handle = file.reopen()?;
         writer_handle.seek(SeekFrom::End(0))?;
@@ -226,6 +227,7 @@ impl TripletSpool {
             runs: Vec::new(),
             bytes_written: 0,
             total: 0,
+            sort_pool,
         })
     }
 
@@ -234,7 +236,14 @@ impl TripletSpool {
             return Ok(());
         }
 
-        buffer.par_sort_unstable();
+        const PARALLEL_SORT_THRESHOLD: usize = 32_768;
+        if buffer.len() > 1 {
+            if buffer.len() >= PARALLEL_SORT_THRESHOLD {
+                self.sort_pool.install(|| buffer.par_sort_unstable());
+            } else {
+                buffer.sort_unstable();
+            }
+        }
 
         let mut write_len = 0usize;
         for idx in 0..buffer.len() {
@@ -430,6 +439,15 @@ impl StreamingMatrixBuilder {
         let n_cells = barcode_processor.len();
         let spill_threshold = config.triplet_spill_nnz.max(1);
 
+        let sort_threads = std::cmp::max(1, config.threads / 4).min(8);
+        let sort_pool = Arc::new(
+            ThreadPoolBuilder::new()
+                .num_threads(sort_threads)
+                .thread_name(|idx| format!("anndata-sort-{idx}"))
+                .build()
+                .context("failed to build AnnData sorting thread pool")?,
+        );
+
         let forward_buffers = [
             Vec::with_capacity(config.chunk_size),
             Vec::with_capacity(config.chunk_size),
@@ -437,10 +455,10 @@ impl StreamingMatrixBuilder {
             Vec::with_capacity(config.chunk_size),
         ];
         let forward_spools = [
-            TripletSpool::new()?,
-            TripletSpool::new()?,
-            TripletSpool::new()?,
-            TripletSpool::new()?,
+            TripletSpool::new(Arc::clone(&sort_pool))?,
+            TripletSpool::new(Arc::clone(&sort_pool))?,
+            TripletSpool::new(Arc::clone(&sort_pool))?,
+            TripletSpool::new(Arc::clone(&sort_pool))?,
         ];
 
         let (reverse_buffers, reverse_spools) = if config.stranded {
@@ -451,10 +469,10 @@ impl StreamingMatrixBuilder {
                 Vec::with_capacity(config.chunk_size),
             ];
             let spools = [
-                TripletSpool::new()?,
-                TripletSpool::new()?,
-                TripletSpool::new()?,
-                TripletSpool::new()?,
+                TripletSpool::new(Arc::clone(&sort_pool))?,
+                TripletSpool::new(Arc::clone(&sort_pool))?,
+                TripletSpool::new(Arc::clone(&sort_pool))?,
+                TripletSpool::new(Arc::clone(&sort_pool))?,
             ];
             (Some(buffers), Some(spools))
         } else {
@@ -717,10 +735,7 @@ fn stream_to_csr(
     let mut pending_value: u32 = 0;
 
     while let Some(triplet) = stream.next()? {
-        let Some(remapped_row) = cell_remap
-            .get(triplet.row as usize)
-            .and_then(|opt| *opt)
-        else {
+        let Some(remapped_row) = cell_remap.get(triplet.row as usize).and_then(|opt| *opt) else {
             continue;
         };
 
@@ -769,7 +784,18 @@ fn stream_to_csr(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
     use anyhow::Result;
+    use std::sync::Arc;
+
+    fn test_sort_pool() -> Result<Arc<ThreadPool>> {
+        Ok(Arc::new(
+            ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .context("failed to build test sorting pool")?,
+        ))
+    }
 
     fn make_counts(
         forward: (u32, u32, u32, u32),
@@ -896,7 +922,8 @@ mod tests {
 
     #[test]
     fn triplet_spool_merges_runs_in_order() -> Result<()> {
-        let mut spool = TripletSpool::new()?;
+        let sort_pool = test_sort_pool()?;
+        let mut spool = TripletSpool::new(sort_pool)?;
 
         let mut run_a = vec![
             Triplet {
@@ -944,12 +971,7 @@ mod tests {
 
         assert_eq!(
             observed,
-            vec![
-                (0, 0, 7.0),
-                (1, 3, 7.0),
-                (2, 5, 5.0),
-                (3, 1, 6.0),
-            ]
+            vec![(0, 0, 7.0), (1, 3, 7.0), (2, 5, 5.0), (3, 1, 6.0),]
         );
 
         Ok(())

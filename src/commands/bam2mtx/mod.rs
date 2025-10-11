@@ -27,7 +27,7 @@ use input::{chunk_positions, filter_positions_by, read_positions, PositionChunk}
 use workflow::prepare_positions_file;
 
 /// Calculate adaptive channel capacity based on workload characteristics.
-/// 
+///
 /// This function estimates optimal channel capacity considering:
 /// - Thread count (parallelism level)
 /// - Chunk sizes and weights (memory footprint)
@@ -41,7 +41,7 @@ fn estimate_channel_capacity(
     available_memory_gb: u64,
 ) -> usize {
     if chunks.is_empty() {
-        return threads * 2;  // Fallback to simple heuristic
+        return threads * 2; // Fallback to simple heuristic
     }
 
     // Calculate average chunk weight (positions × depth)
@@ -50,7 +50,7 @@ fn estimate_channel_capacity(
 
     // Estimate memory per buffered chunk (rough approximation)
     // Each position typically uses ~100-500 bytes depending on depth
-    let bytes_per_weight_unit = 200_u64;  // Conservative estimate
+    let bytes_per_weight_unit = 200_u64; // Conservative estimate
     let avg_chunk_memory_mb = (avg_weight * bytes_per_weight_unit) / (1024 * 1024);
 
     // Base capacity: threads * 2 (producer-consumer pattern)
@@ -68,10 +68,10 @@ fn estimate_channel_capacity(
 
     // Choose the minimum of all constraints, but at least base_capacity
     let capacity = base_capacity
-        .max(8)  // Minimum 8 to avoid thrashing
+        .max(8) // Minimum 8 to avoid thrashing
         .min(max_by_memory)
         .min(max_by_chunks)
-        .min(1024);  // Hard cap at 1024 to prevent excessive memory
+        .min(1024); // Hard cap at 1024 to prevent excessive memory
 
     capacity
 }
@@ -184,32 +184,32 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
             std::fs::read_to_string("/proc/meminfo")
                 .ok()
                 .and_then(|content| {
-                    content.lines()
+                    content
+                        .lines()
                         .find(|line| line.starts_with("MemAvailable:"))
                         .and_then(|line| {
                             line.split_whitespace()
                                 .nth(1)
                                 .and_then(|s| s.parse::<u64>().ok())
-                                .map(|kb| kb / (1024 * 1024))  // KB to GB
+                                .map(|kb| kb / (1024 * 1024)) // KB to GB
                         })
                 })
-                .unwrap_or(8)  // Default to 8GB if detection fails
+                .unwrap_or(8) // Default to 8GB if detection fails
         }
         #[cfg(not(target_os = "linux"))]
         {
-            8  // Conservative default for non-Linux systems
+            8 // Conservative default for non-Linux systems
         }
     };
 
-    let channel_capacity = estimate_channel_capacity(
-        active_threads,
-        &chunks,
-        available_memory_gb,
-    );
-    
+    let channel_capacity = estimate_channel_capacity(active_threads, &chunks, available_memory_gb);
+
     info!(
         "Creating adaptive bounded channel: capacity={} (threads={}, chunks={}, memory={}GB)",
-        channel_capacity, active_threads, chunks.len(), available_memory_gb
+        channel_capacity,
+        active_threads,
+        chunks.len(),
+        available_memory_gb
     );
     let (sender, receiver) = bounded(channel_capacity);
     let output_path = args.output.clone();
@@ -312,7 +312,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
         )?;
         // sender_clone is dropped here when the scope ends
     }
-    
+
     // Now drop the original sender - this ensures ALL senders are dropped
     drop(sender);
     info!("All chunk senders dropped, waiting for writer thread to complete...");
