@@ -20,6 +20,9 @@ pub mod anndata_output;
 pub mod barcode;
 pub mod processor;
 
+#[cfg(test)]
+mod deadlock_test;
+
 pub use anndata_output::AnnDataConverter;
 pub use barcode::BarcodeProcessor;
 pub use processor::BamProcessor;

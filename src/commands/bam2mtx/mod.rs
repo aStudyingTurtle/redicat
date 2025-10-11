@@ -127,6 +127,10 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     let last_long_report = AtomicU64::new(0);
 
     let channel_capacity = usize::max(active_threads.saturating_mul(2), 1);
+    info!(
+        "Creating bounded channel with capacity {} (threads={}, multiplier=2)",
+        channel_capacity, active_threads
+    );
     let (sender, receiver) = bounded(channel_capacity);
     let output_path = args.output.clone();
     let converter =
@@ -153,78 +157,85 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
         Ok(())
     });
 
-    let sender_clone = sender.clone();
-    let skipped_sites_clone = Arc::clone(&skipped_sites);
-    chunks.into_par_iter().enumerate().try_for_each_init(
-        || (sender_clone.clone(), Arc::clone(&skipped_sites_clone)),
-        |(tx, skipped_bucket), (idx, chunk)| -> Result<()> {
-            let chunk_near = chunk.near_max_depth_count();
-            let (data, skipped) = processor.process_chunk(&chunk)?;
-            if !skipped.is_empty() {
-                let mut guard = skipped_bucket.lock();
-                guard.extend(skipped);
-            }
-            let chunk_positions = data.len();
-            if chunk_positions > 0 {
-                tx.send(data)
-                    .map_err(|err| anyhow!("failed to send chunk {idx}: {err}"))?;
-                total_positions.fetch_add(chunk_positions, Ordering::Relaxed);
-            }
+    // CRITICAL FIX: Ensure all sender clones are dropped before waiting for writer thread
+    // Use a scoped block to guarantee cleanup of all sender clones from Rayon threads
+    {
+        let sender_clone = sender.clone();
+        let skipped_sites_clone = Arc::clone(&skipped_sites);
+        chunks.into_par_iter().enumerate().try_for_each_init(
+            || (sender_clone.clone(), Arc::clone(&skipped_sites_clone)),
+            |(tx, skipped_bucket), (idx, chunk)| -> Result<()> {
+                let chunk_near = chunk.near_max_depth_count();
+                let (data, skipped) = processor.process_chunk(&chunk)?;
+                if !skipped.is_empty() {
+                    let mut guard = skipped_bucket.lock();
+                    guard.extend(skipped);
+                }
+                let chunk_positions = data.len();
+                if chunk_positions > 0 {
+                    tx.send(data)
+                        .map_err(|err| anyhow!("failed to send chunk {idx}: {err}"))?;
+                    total_positions.fetch_add(chunk_positions, Ordering::Relaxed);
+                }
 
-            let near_remaining = if chunk_near == 0 {
-                near_max_remaining.load(Ordering::Relaxed)
-            } else {
-                near_max_remaining
-                    .fetch_sub(chunk_near, Ordering::Relaxed)
-                    .saturating_sub(chunk_near)
-            };
+                let near_remaining = if chunk_near == 0 {
+                    near_max_remaining.load(Ordering::Relaxed)
+                } else {
+                    near_max_remaining
+                        .fetch_sub(chunk_near, Ordering::Relaxed)
+                        .saturating_sub(chunk_near)
+                };
 
-            let completed = processed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
-            let percent = if completed < total_chunks {
-                let scaled = (completed as f64 * 1000.0)
-                    / total_chunks.max(1) as f64;
-                (scaled.floor()) / 10.0
-            } else {
-                100.0
-            };
-            if completed == total_chunks || completed.is_multiple_of(log_step) {
-                info!(
-                    "Processed {:.1}% ({} / {} chunks, {} near-max-depth positions remaining)",
-                    percent,
-                    completed,
-                    total_chunks,
-                    near_remaining
-                );
-            }
-
-            let elapsed = processing_start.elapsed();
-            let elapsed_secs = elapsed.as_secs();
-            let last_marker = last_long_report.load(Ordering::Relaxed);
-            if elapsed_secs.saturating_sub(last_marker) >= long_report_interval.as_secs() {
-                if last_long_report
-                    .compare_exchange(
-                        last_marker,
-                        elapsed_secs,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    let remaining_chunks = total_chunks.saturating_sub(completed);
+                let completed = processed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
+                let percent = if completed < total_chunks {
+                    let scaled = (completed as f64 * 1000.0)
+                        / total_chunks.max(1) as f64;
+                    (scaled.floor()) / 10.0
+                } else {
+                    100.0
+                };
+                if completed == total_chunks || completed.is_multiple_of(log_step) {
                     info!(
-                        "Long-running status: {} chunks remaining, {} near-max-depth positions pending (elapsed {:?})",
-                        remaining_chunks,
-                        near_remaining,
-                        elapsed
+                        "Processed {:.1}% ({} / {} chunks, {} near-max-depth positions remaining)",
+                        percent,
+                        completed,
+                        total_chunks,
+                        near_remaining
                     );
                 }
-            }
 
-            Ok(())
-        },
-    )?;
+                let elapsed = processing_start.elapsed();
+                let elapsed_secs = elapsed.as_secs();
+                let last_marker = last_long_report.load(Ordering::Relaxed);
+                if elapsed_secs.saturating_sub(last_marker) >= long_report_interval.as_secs() {
+                    if last_long_report
+                        .compare_exchange(
+                            last_marker,
+                            elapsed_secs,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        let remaining_chunks = total_chunks.saturating_sub(completed);
+                        info!(
+                            "Long-running status: {} chunks remaining, {} near-max-depth positions pending (elapsed {:?})",
+                            remaining_chunks,
+                            near_remaining,
+                            elapsed
+                        );
+                    }
+                }
 
+                Ok(())
+            },
+        )?;
+        // sender_clone is dropped here when the scope ends
+    }
+    
+    // Now drop the original sender - this ensures ALL senders are dropped
     drop(sender);
+    info!("All chunk senders dropped, waiting for writer thread to complete...");
 
     let writer_result = writer_handle.join().map_err(|err| {
         let panic_msg = if let Some(msg) = err.downcast_ref::<&str>() {

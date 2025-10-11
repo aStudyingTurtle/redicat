@@ -7,5 +7,4 @@ chr22.tsv.gz
 perf.data*
 flamegraph.svg
 memory_analysis.md
-CHANGES_v0.3.1.md
 py/** */
