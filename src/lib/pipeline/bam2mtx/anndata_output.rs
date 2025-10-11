@@ -12,10 +12,12 @@ use anndata::{AnnData, AnnDataOp, AxisArraysOp};
 use anndata_hdf5::H5;
 use anyhow::{anyhow, Context, Result};
 use log::info;
-use nalgebra_sparse::coo::CooMatrix;
 use nalgebra_sparse::csr::CsrMatrix;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use std::cmp::Ordering;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::convert::TryInto;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -159,11 +161,26 @@ impl AnnDataConverter {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Triplet {
     row: u32,
     col: u32,
     value: u32,
+}
+
+impl Ord for Triplet {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.row.cmp(&other.row) {
+            Ordering::Equal => self.col.cmp(&other.col),
+            ord => ord,
+        }
+    }
+}
+
+impl PartialOrd for Triplet {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Triplet {
@@ -187,7 +204,14 @@ impl Triplet {
 struct TripletSpool {
     file: NamedTempFile,
     writer: BufWriter<std::fs::File>,
+    runs: Vec<RunMeta>,
+    bytes_written: u64,
     total: usize,
+}
+
+struct RunMeta {
+    offset: u64,
+    len: usize,
 }
 
 impl TripletSpool {
@@ -199,17 +223,63 @@ impl TripletSpool {
         Ok(Self {
             file,
             writer,
+            runs: Vec::new(),
+            bytes_written: 0,
             total: 0,
         })
     }
 
-    fn append(&mut self, triplets: &[Triplet]) -> Result<()> {
-        for triplet in triplets {
+    fn append_from_buffer(&mut self, buffer: &mut Vec<Triplet>) -> Result<()> {
+        if buffer.is_empty() {
+            return Ok(());
+        }
+
+        buffer.par_sort_unstable();
+
+        let mut write_len = 0usize;
+        for idx in 0..buffer.len() {
+            if write_len == 0 {
+                buffer[write_len] = buffer[idx];
+                write_len = 1;
+                continue;
+            }
+
+            let prev = buffer[write_len - 1];
+            let current = buffer[idx];
+            if prev.row == current.row && prev.col == current.col {
+                let merged = Triplet {
+                    row: prev.row,
+                    col: prev.col,
+                    value: prev.value.saturating_add(current.value),
+                };
+                buffer[write_len - 1] = merged;
+            } else {
+                buffer[write_len] = current;
+                write_len += 1;
+            }
+        }
+
+        if write_len == 0 {
+            buffer.clear();
+            return Ok(());
+        }
+
+        let offset = self.bytes_written;
+        let bytes = (write_len as u64) * 12;
+
+        for triplet in buffer.iter().take(write_len) {
             self.writer
                 .write_all(&triplet.to_bytes())
                 .context("failed to write triplet to spill file")?;
         }
-        self.total += triplets.len();
+
+        self.runs.push(RunMeta {
+            offset,
+            len: write_len,
+        });
+        self.bytes_written += bytes;
+        self.total += write_len;
+        buffer.clear();
         Ok(())
     }
 
@@ -217,23 +287,108 @@ impl TripletSpool {
         self.writer.flush().context("failed to flush spill buffer")
     }
 
-    fn read_into(&mut self, target: &mut Vec<Triplet>) -> Result<()> {
+    fn stream(&mut self) -> Result<TripletStream> {
         self.flush()?;
-        if self.total == 0 {
-            return Ok(());
+        TripletStream::new(self)
+    }
+}
+
+struct TripletStream {
+    runs: Vec<RunState>,
+    heap: BinaryHeap<Reverse<HeapEntry>>,
+}
+
+struct RunState {
+    reader: BufReader<std::fs::File>,
+    remaining: usize,
+}
+
+impl RunState {
+    fn read_next(&mut self) -> Result<Option<Triplet>> {
+        if self.remaining == 0 {
+            return Ok(None);
         }
 
-        target.reserve(self.total);
-        let mut reader = BufReader::with_capacity(1 << 20, self.file.reopen()?);
         let mut buf = [0u8; 12];
-        loop {
-            match reader.read_exact(&mut buf) {
-                Ok(()) => target.push(Triplet::from_bytes(&buf)),
-                Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(err) => return Err(err.into()),
+        self.reader.read_exact(&mut buf)?;
+        self.remaining -= 1;
+        Ok(Some(Triplet::from_bytes(&buf)))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HeapEntry {
+    run_idx: usize,
+    triplet: Triplet,
+}
+
+impl PartialEq for HeapEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.triplet == other.triplet && self.run_idx == other.run_idx
+    }
+}
+
+impl Eq for HeapEntry {}
+
+impl Ord for HeapEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.triplet.cmp(&other.triplet) {
+            Ordering::Equal => self.run_idx.cmp(&other.run_idx),
+            ord => ord,
+        }
+    }
+}
+
+impl PartialOrd for HeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl TripletStream {
+    fn new(spool: &TripletSpool) -> Result<Self> {
+        let mut runs = Vec::with_capacity(spool.runs.len());
+        let mut heap = BinaryHeap::new();
+
+        for meta in spool.runs.iter() {
+            if meta.len == 0 {
+                continue;
+            }
+
+            let mut file = spool.file.reopen()?;
+            file.seek(SeekFrom::Start(meta.offset))?;
+            let mut run_state = RunState {
+                reader: BufReader::with_capacity(1 << 20, file),
+                remaining: meta.len,
+            };
+
+            if let Some(first) = run_state.read_next()? {
+                let run_idx = runs.len();
+                heap.push(Reverse(HeapEntry {
+                    run_idx,
+                    triplet: first,
+                }));
+                runs.push(run_state);
             }
         }
-        Ok(())
+
+        Ok(Self { runs, heap })
+    }
+
+    fn next(&mut self) -> Result<Option<Triplet>> {
+        let Some(Reverse(entry)) = self.heap.pop() else {
+            return Ok(None);
+        };
+
+        let triplet = entry.triplet;
+        if let Some(next_triplet) = self.runs[entry.run_idx].read_next()? {
+            self.heap.push(Reverse(HeapEntry {
+                run_idx: entry.run_idx,
+                triplet: next_triplet,
+            }));
+        }
+
+        Ok(Some(triplet))
     }
 }
 
@@ -451,8 +606,7 @@ impl StreamingMatrixBuilder {
             .zip(self.forward_spools.iter_mut())
         {
             if !buffer.is_empty() {
-                spool.append(buffer)?;
-                buffer.clear();
+                spool.append_from_buffer(buffer)?;
             }
         }
 
@@ -461,8 +615,7 @@ impl StreamingMatrixBuilder {
         {
             for (buffer, spool) in buffers.iter_mut().zip(spools.iter_mut()) {
                 if !buffer.is_empty() {
-                    spool.append(buffer)?;
-                    buffer.clear();
+                    spool.append_from_buffer(buffer)?;
                 }
             }
         }
@@ -534,68 +687,83 @@ fn materialize_layers(
 ) -> Result<Vec<CsrMatrix<f32>>> {
     let mut layers = Vec::with_capacity(4);
     for (layer_idx, (spool, buffer)) in spools.iter_mut().zip(buffers.iter_mut()).enumerate() {
-        let mut triplets = Vec::new();
-        spool.read_into(&mut triplets)?;
-        triplets.extend(buffer.drain(..));
+        if !buffer.is_empty() {
+            spool.append_from_buffer(buffer)?;
+        }
 
-        remap_triplets(&mut triplets, cell_remap);
-        let matrix = triplets_to_csr(triplets, n_rows, n_cols)?;
+        let mut stream = spool.stream()?;
+        let matrix = stream_to_csr(&mut stream, cell_remap, n_rows, n_cols)?;
         info!("Layer {} assembled with {} nnz", layer_idx, matrix.nnz());
         layers.push(matrix);
     }
     Ok(layers)
 }
 
-fn remap_triplets(triplets: &mut Vec<Triplet>, cell_remap: &[Option<u32>]) {
-    let mut write_idx = 0usize;
-    for read_idx in 0..triplets.len() {
-        let orig_row = triplets[read_idx].row as usize;
-        if let Some(new_row) = cell_remap.get(orig_row).and_then(|opt| *opt) {
-            triplets[write_idx] = Triplet {
-                row: new_row,
-                col: triplets[read_idx].col,
-                value: triplets[read_idx].value,
-            };
-            write_idx += 1;
-        }
-    }
-    triplets.truncate(write_idx);
-}
-
-fn triplets_to_csr(triplets: Vec<Triplet>, n_rows: usize, n_cols: usize) -> Result<CsrMatrix<f32>> {
-    if triplets.is_empty() {
+fn stream_to_csr(
+    stream: &mut TripletStream,
+    cell_remap: &[Option<u32>],
+    n_rows: usize,
+    n_cols: usize,
+) -> Result<CsrMatrix<f32>> {
+    if n_rows == 0 || n_cols == 0 {
         return Ok(CsrMatrix::zeros(n_rows, n_cols));
     }
 
-    let mut triplets = triplets;
-    triplets.par_sort_unstable_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
+    let mut column_indices: Vec<usize> = Vec::new();
+    let mut values: Vec<f32> = Vec::new();
+    let mut row_counts = vec![0usize; n_rows];
 
-    let mut merged = Vec::with_capacity(triplets.len());
-    let mut iter = triplets.into_iter();
-    if let Some(mut current) = iter.next() {
-        for triplet in iter {
-            if triplet.row == current.row && triplet.col == current.col {
-                current.value = current.value.saturating_add(triplet.value);
+    let mut pending_key: Option<(usize, usize)> = None;
+    let mut pending_value: u32 = 0;
+
+    while let Some(triplet) = stream.next()? {
+        let Some(remapped_row) = cell_remap
+            .get(triplet.row as usize)
+            .and_then(|opt| *opt)
+        else {
+            continue;
+        };
+
+        let row = remapped_row as usize;
+        let col = triplet.col as usize;
+        if row >= n_rows || col >= n_cols {
+            continue;
+        }
+
+        if let Some((prev_row, prev_col)) = pending_key {
+            if prev_row == row && prev_col == col {
+                pending_value = pending_value.saturating_add(triplet.value);
+                continue;
             } else {
-                merged.push(current);
-                current = triplet;
+                row_counts[prev_row] = row_counts[prev_row].saturating_add(1);
+                column_indices.push(prev_col);
+                values.push(pending_value as f32);
             }
         }
-        merged.push(current);
+
+        pending_key = Some((row, col));
+        pending_value = triplet.value;
     }
 
-    let mut rows = Vec::with_capacity(merged.len());
-    let mut cols = Vec::with_capacity(merged.len());
-    let mut values = Vec::with_capacity(merged.len());
-    for Triplet { row, col, value } in merged {
-        rows.push(row as usize);
-        cols.push(col as usize);
-        values.push(value as f32);
+    if let Some((row, col)) = pending_key {
+        row_counts[row] = row_counts[row].saturating_add(1);
+        column_indices.push(col);
+        values.push(pending_value as f32);
     }
 
-    let coo = CooMatrix::try_from_triplets(n_rows, n_cols, rows, cols, values)
-        .map_err(|err| anyhow!(err.to_string()))?;
-    Ok(CsrMatrix::from(&coo))
+    let mut row_offsets = Vec::with_capacity(n_rows + 1);
+    row_offsets.push(0);
+    let mut nnz = 0usize;
+    for count in row_counts.into_iter() {
+        nnz = nnz.saturating_add(count);
+        row_offsets.push(nnz);
+    }
+
+    debug_assert_eq!(nnz, column_indices.len());
+    debug_assert_eq!(column_indices.len(), values.len());
+
+    CsrMatrix::try_from_csr_data(n_rows, n_cols, row_offsets, column_indices, values)
+        .map_err(|err| anyhow!(err.to_string()))
 }
 
 #[cfg(test)]
@@ -636,10 +804,14 @@ mod tests {
     }
 
     fn matrix_entries(matrix: &CsrMatrix<f32>) -> Vec<(usize, usize, f32)> {
-        CooMatrix::from(matrix)
-            .triplet_iter()
-            .map(|(r, c, v)| (r, c, *v))
-            .collect()
+        let mut entries = Vec::new();
+        for row in 0..matrix.nrows() {
+            let view = matrix.row(row);
+            for (&col, &value) in view.col_indices().iter().zip(view.values()) {
+                entries.push((row, col, value));
+            }
+        }
+        entries
     }
 
     #[test]
@@ -718,6 +890,67 @@ mod tests {
 
         let reverse_c = matrix_entries(&reverse_layers[3]);
         assert_eq!(reverse_c, vec![(1, 0, 2.0)]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn triplet_spool_merges_runs_in_order() -> Result<()> {
+        let mut spool = TripletSpool::new()?;
+
+        let mut run_a = vec![
+            Triplet {
+                row: 2,
+                col: 5,
+                value: 1,
+            },
+            Triplet {
+                row: 1,
+                col: 3,
+                value: 2,
+            },
+            Triplet {
+                row: 2,
+                col: 5,
+                value: 4,
+            },
+        ];
+        spool.append_from_buffer(&mut run_a)?;
+
+        let mut run_b = vec![
+            Triplet {
+                row: 0,
+                col: 0,
+                value: 7,
+            },
+            Triplet {
+                row: 1,
+                col: 3,
+                value: 5,
+            },
+            Triplet {
+                row: 3,
+                col: 1,
+                value: 6,
+            },
+        ];
+        spool.append_from_buffer(&mut run_b)?;
+
+        let mut stream = spool.stream()?;
+        let identity_remap = (0..4).map(|idx| Some(idx as u32)).collect::<Vec<_>>();
+        let matrix = stream_to_csr(&mut stream, &identity_remap, 4, 6)?;
+        let mut observed = matrix_entries(&matrix);
+        observed.sort_unstable_by_key(|&(row, col, _)| (row, col));
+
+        assert_eq!(
+            observed,
+            vec![
+                (0, 0, 7.0),
+                (1, 3, 7.0),
+                (2, 5, 5.0),
+                (3, 1, 6.0),
+            ]
+        );
 
         Ok(())
     }
