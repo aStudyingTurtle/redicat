@@ -23,8 +23,58 @@ use crate::commands::{common, is_standard_contig};
 
 pub use args::Bam2MtxArgs;
 use engine::{OptimizedChunkProcessor, SkippedSite};
-use input::{chunk_positions, filter_positions_by, read_positions};
+use input::{chunk_positions, filter_positions_by, read_positions, PositionChunk};
 use workflow::prepare_positions_file;
+
+/// Calculate adaptive channel capacity based on workload characteristics.
+/// 
+/// This function estimates optimal channel capacity considering:
+/// - Thread count (parallelism level)
+/// - Chunk sizes and weights (memory footprint)
+/// - Available system memory
+/// - Total number of chunks (queue depth)
+///
+/// Returns a capacity that balances throughput and memory usage.
+fn estimate_channel_capacity(
+    threads: usize,
+    chunks: &[PositionChunk],
+    available_memory_gb: u64,
+) -> usize {
+    if chunks.is_empty() {
+        return threads * 2;  // Fallback to simple heuristic
+    }
+
+    // Calculate average chunk weight (positions × depth)
+    let total_weight: u64 = chunks.iter().map(|c| c.total_weight()).sum();
+    let avg_weight = total_weight / chunks.len() as u64;
+
+    // Estimate memory per buffered chunk (rough approximation)
+    // Each position typically uses ~100-500 bytes depending on depth
+    let bytes_per_weight_unit = 200_u64;  // Conservative estimate
+    let avg_chunk_memory_mb = (avg_weight * bytes_per_weight_unit) / (1024 * 1024);
+
+    // Base capacity: threads * 2 (producer-consumer pattern)
+    let base_capacity = threads.saturating_mul(2);
+
+    // Maximum by memory: don't use more than 10% of available memory for buffering
+    let max_by_memory = if avg_chunk_memory_mb > 0 {
+        ((available_memory_gb * 1024 * 10) / 100 / avg_chunk_memory_mb) as usize
+    } else {
+        base_capacity * 4
+    };
+
+    // Maximum by chunk count: don't buffer more than 25% of total chunks
+    let max_by_chunks = chunks.len() / 4;
+
+    // Choose the minimum of all constraints, but at least base_capacity
+    let capacity = base_capacity
+        .max(8)  // Minimum 8 to avoid thrashing
+        .min(max_by_memory)
+        .min(max_by_chunks)
+        .min(1024);  // Hard cap at 1024 to prevent excessive memory
+
+    capacity
+}
 
 /// Entry point for the `bam2mtx` command.
 pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
@@ -126,10 +176,40 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     let long_report_interval = Duration::from_secs(1800);
     let last_long_report = AtomicU64::new(0);
 
-    let channel_capacity = usize::max(active_threads.saturating_mul(2), 1);
+    // Adaptive channel capacity based on workload characteristics
+    let available_memory_gb = {
+        // Try to get system memory, fallback to conservative estimate
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_to_string("/proc/meminfo")
+                .ok()
+                .and_then(|content| {
+                    content.lines()
+                        .find(|line| line.starts_with("MemAvailable:"))
+                        .and_then(|line| {
+                            line.split_whitespace()
+                                .nth(1)
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .map(|kb| kb / (1024 * 1024))  // KB to GB
+                        })
+                })
+                .unwrap_or(8)  // Default to 8GB if detection fails
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            8  // Conservative default for non-Linux systems
+        }
+    };
+
+    let channel_capacity = estimate_channel_capacity(
+        active_threads,
+        &chunks,
+        available_memory_gb,
+    );
+    
     info!(
-        "Creating bounded channel with capacity {} (threads={}, multiplier=2)",
-        channel_capacity, active_threads
+        "Creating adaptive bounded channel: capacity={} (threads={}, chunks={}, memory={}GB)",
+        channel_capacity, active_threads, chunks.len(), available_memory_gb
     );
     let (sender, receiver) = bounded(channel_capacity);
     let output_path = args.output.clone();

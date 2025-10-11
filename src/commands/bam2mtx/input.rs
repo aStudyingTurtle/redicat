@@ -41,6 +41,17 @@ impl PositionChunk {
     pub fn near_max_depth_count(&self) -> usize {
         self.near_max_depth_count
     }
+
+    /// Calculate total weight (positions × depth) for capacity estimation.
+    /// This helps estimate memory footprint for adaptive channel sizing.
+    #[inline]
+    pub fn total_weight(&self) -> u64 {
+        self.positions
+            .iter()
+            .map(|p| p.depth as u64)
+            .sum::<u64>()
+            .saturating_mul(self.positions.len() as u64)
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

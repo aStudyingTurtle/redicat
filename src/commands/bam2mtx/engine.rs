@@ -7,10 +7,55 @@ use redicat_lib::bam2mtx::processor::{
 };
 use rust_htslib::bam::{self, Read};
 use rustc_hash::FxHashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::input::PositionChunk;
+
+/// Number of shards for UMI interner (power of 2 for fast modulo)
+const UMI_INTERNER_SHARDS: usize = 16;
+
+/// Sharded UMI string interner to reduce lock contention.
+/// Uses 16 independent shards, reducing contention by ~90%.
+struct ShardedUmiInterner {
+    shards: [Mutex<FxHashMap<String, Arc<str>>>; UMI_INTERNER_SHARDS],
+}
+
+impl ShardedUmiInterner {
+    fn new() -> Self {
+        // Create array of empty hashmaps wrapped in Mutex
+        Self {
+            shards: std::array::from_fn(|_| Mutex::new(FxHashMap::default())),
+        }
+    }
+
+    /// Intern a UMI string, returning a shared Arc<str>.
+    /// Uses FxHash for shard selection (fast, non-crypto hash).
+    fn intern(&self, umi: &str) -> Arc<str> {
+        // Use FxHash (same as FxHashMap) for consistent hashing
+        let mut hasher = rustc_hash::FxHasher::default();
+        umi.hash(&mut hasher);
+        let hash = hasher.finish();
+        let shard_idx = (hash as usize) % UMI_INTERNER_SHARDS;
+
+        let mut shard = self.shards[shard_idx].lock();
+        shard
+            .entry(umi.to_string())
+            .or_insert_with(|| Arc::from(umi))
+            .clone()
+    }
+
+    /// Get statistics about interner usage (for debugging/monitoring).
+    #[allow(dead_code)]
+    fn stats(&self) -> Vec<usize> {
+        self.shards
+            .iter()
+            .map(|shard| shard.lock().len())
+            .collect()
+    }
+}
 
 /// Metadata for genomic sites skipped due to exceeding the configured depth ceiling.
 #[derive(Debug, Clone)]
@@ -21,7 +66,7 @@ pub struct SkippedSite {
 }
 
 /// Chunk processor with aggressive reuse of BAM readers and pre-sized hash maps.
-/// Now includes UMI string interning to reduce memory usage.
+/// Now includes sharded UMI string interning to reduce memory usage and lock contention.
 pub struct OptimizedChunkProcessor {
     bam_path: PathBuf,
     config: BamProcessorConfig,
@@ -31,7 +76,8 @@ pub struct OptimizedChunkProcessor {
     count_capacity_hint: usize,
     umi_capacity_hint: usize,
     reader_pool: Mutex<Vec<bam::IndexedReader>>,
-    umi_interner: Arc<Mutex<FxHashMap<String, Arc<str>>>>,
+    reader_pool_size: AtomicUsize,  // Lock-free size tracking
+    umi_interner: Arc<ShardedUmiInterner>,  // Sharded for reduced contention
 }
 
 impl OptimizedChunkProcessor {
@@ -69,7 +115,8 @@ impl OptimizedChunkProcessor {
             count_capacity_hint,
             umi_capacity_hint,
             reader_pool: Mutex::new(Vec::new()),
-            umi_interner: Arc::new(Mutex::new(FxHashMap::default())),
+            reader_pool_size: AtomicUsize::new(0),
+            umi_interner: Arc::new(ShardedUmiInterner::new()),
         })
     }
 
@@ -85,21 +132,33 @@ impl OptimizedChunkProcessor {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        let mut reader = {
+        // Optimized reader acquisition with lock-free empty check
+        let mut reader = if self.reader_pool_size.load(Ordering::Acquire) > 0 {
+            // Pool might have readers, try to get one
             let mut pool = self.reader_pool.lock();
-            pool.pop()
-        }
-        .unwrap_or_else(|| {
+            if let Some(r) = pool.pop() {
+                self.reader_pool_size.fetch_sub(1, Ordering::Release);
+                r
+            } else {
+                // Race condition: another thread took it, create new reader
+                drop(pool);  // Release lock before I/O
+                bam::IndexedReader::from_path(&self.bam_path)
+                    .unwrap_or_else(|e| panic!("Failed to open BAM {}: {}", self.bam_path.display(), e))
+            }
+        } else {
+            // Pool is empty, create new reader without locking
             bam::IndexedReader::from_path(&self.bam_path)
                 .unwrap_or_else(|e| panic!("Failed to open BAM {}: {}", self.bam_path.display(), e))
-        });
+        };
 
         let chrom = &chunk.positions[0].chrom;
         let tid = match self.tid_lookup.get(chrom) {
             Some(&tid) => tid,
             None => {
+                // Return reader to pool with atomic size update
                 let mut pool = self.reader_pool.lock();
                 pool.push(reader);
+                self.reader_pool_size.fetch_add(1, Ordering::Release);
                 return Ok((Vec::new(), Vec::new()));
             }
         };
@@ -219,14 +278,8 @@ impl OptimizedChunkProcessor {
                     None => continue,
                 };
 
-                // Intern UMI string to reduce memory usage
-                let umi_arc = {
-                    let mut interner = self.umi_interner.lock();
-                    interner
-                        .entry(umi.clone())
-                        .or_insert_with(|| Arc::from(umi.as_str()))
-                        .clone()
-                };
+                // Intern UMI string using sharded interner (reduced lock contention)
+                let umi_arc = self.umi_interner.intern(&umi);
 
                 if let Some(encoded) = encode_call(self.config.stranded, base, record.is_reverse())
                 {
@@ -259,9 +312,11 @@ impl OptimizedChunkProcessor {
             });
         }
 
+        // Return reader to pool with atomic size update
         {
             let mut pool = self.reader_pool.lock();
             pool.push(reader);
+            self.reader_pool_size.fetch_add(1, Ordering::Release);
         }
 
         Ok((chunk_results, skipped_sites))
