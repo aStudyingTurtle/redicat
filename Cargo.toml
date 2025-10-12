@@ -25,8 +25,8 @@ opt-level = 3
 # lto = "thin"
 lto = "fat"
 codegen-units = 1
-debug = false     # Remove debug info
-panic = "abort"   # Smaller binary, slightly faster
+debug = true     # Remove debug info
+panic = "unwind"   # Smaller binary, slightly faster
 
 [lib]
 name = "redicat_lib"
