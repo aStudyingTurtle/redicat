@@ -15,6 +15,7 @@ If REDICAT supports your research, please cite:
 - **Fearless concurrency:** Rayon thread pools, crossbeam channels, and reader pooling keep pileup traversal and sparse matrix assembly fully saturated on modern CPUs.
 - **Dynamic Rayon work queue:** `ParGranges` now flattens genomic tiles into a global work queue so `bulk` keeps every core busy even when only a handful of contigs remain in flight.
 - **Streaming AnnData assembly:** `bam2mtx` pushes chunk results through a bounded channel into a streaming sparse converter, so `.h5ad` generation no longer requires buffering millions of `PositionData` structs in RAM.
+- **Backpressure-aware streaming:** The bam2mtx worker queue now enforces a ≥512 slot buffer and uses adaptive backoff when the AnnData writer lags, eliminating producer-side blocking and keeping Rayon threads busy without risking deadlocks.
 - **Run-aware sparse merging (New):** The AnnData converter now persists sorted triplet runs to disk and performs a streaming multi-way merge when finalising CSR layers, keeping peak RSS close to the sparse output size and preventing the single-threaded 30+ minute stall that previously occurred after "Processed 100%" log events.
 - **Depth-aware chunking:** `bam2mtx` streams TSV manifests with Polars, accumulates position weights (`DEPTH + INS + DEL + REF_SKIP + FAIL`) until the `--chunksize` budget is spent, and automatically falls back to the narrow `--chunk-size-max-depth` batches whenever `NEAR_MAX_DEPTH=true`.
 - **Local-time observability:** Console logs now emit system time zone timestamps and 30-minute status beacons that report remaining chunks alongside outstanding `NEAR_MAX_DEPTH` loci for long-running jobs.
@@ -80,6 +81,7 @@ Add `--allcontigs` to any command that should consider every contig in the BAM h
 ### `bulk`
 Calculates per-base depth and nucleotide counts across a BAM/CRAM. Filtering options allow you to tune MAPQ, base quality, minimum depth, and an editing-specific heuristic. The revamped scheduler flattens genomic tiles into a unified Rayon work queue and forces small stealable tasks via `with_min_len(1)` + adaptive `with_max_len`, keeping CPU utilisation high for long-running bulk traversals. Results stream to a bgzip-compressed TSV with near-max-depth flags computed from the observed post-filter depth.
 `near_max_depth` flags now key off the observed (post-filter) depth, ensuring the 1% ceiling matches the pileup depth returned by htslib after read rejection.
+Positions whose filtered depth reaches the `--max-depth` ceiling are explicitly marked as `NEAR_MAX_DEPTH`, providing an audit trail for loci clipped by the depth guard.
 Some libraries of `bulk` were taken form the [`perbase`](https://github.com/sstadick/perbase) project.
 
 Option reference:
@@ -102,6 +104,7 @@ Option reference:
 
 ### `bam2mtx`
 Converts barcoded BAMs into sparse AnnData matrices (per base, per barcode, strand-aware). Accepts precomputed site lists or can bootstrap one via `--two-pass`, which internally runs `bulk` with the same contour filters. Parallel chunk workers now stream their results through a bounded crossbeam channel into the AnnData writer, eliminating the previous end-of-run aggregation penalty and keeping memory bounded by the active chunk.
+The channel enforces at least 512 buffered chunks and each producer uses adaptive backoff when the writer lags, so Rayon workers never deadlock behind a saturated queue.
 
 During long conversions the console prints system-local timestamps and, every ~30 minutes, a status snapshot summarising remaining chunks and unprocessed `NEAR_MAX_DEPTH` loci so operators can watch backlog decay in real time. At completion the command emits a `<output>_skiped_sites.txt` sibling file listing the contig, 1-based position, and observed depth of every locus that was skipped because its pileup depth met or exceeded `--max-depth`.
 
@@ -140,7 +143,7 @@ Option reference:
 | —     | `--cb-tag`            | BAM tag containing cell barcode.                               | `CB`     |
 | `-r`  | `--reference`         | Reference FASTA (required for CRAM).                           | optional |
 | `-c`  | `--chunksize`         | Genomic position weight budget per processing chunk (applied to standard loci). | `60000` |
-| —     | `--chunk-size-max-depth` | Maximum hotspot chunk length when `NEAR_MAX_DEPTH` is `true` in the TSV. **Updated default to 1 for better memory control.** | `1`     |
+| —     | `--chunk-size-max-depth` | Maximum hotspot chunk length when `NEAR_MAX_DEPTH` is `true` in the TSV. **Updated default to 1 for better memory control.** | `2`     |
 | —     | `--matrix-density`    | Hint for CSR buffer sizing.                                    | `0.005`  |
 | `-A`  | `--allcontigs`        | Include decoys and noncanonical contigs.                       | `false`  |
 
@@ -155,7 +158,9 @@ Important options:
 ## Performance Notes
 - **UMI String Interning (New):** Identical UMI sequences are deduplicated in memory using `Arc<str>`, reducing memory footprint by 50-70% for datasets with repetitive UMIs at high-depth positions.
 - **Adaptive HashMap Capacity (New):** Hash maps dynamically adjust their initial capacity based on chunk characteristics (high-depth vs normal), preventing over-allocation while maintaining performance.
+- **Channel backpressure (New):** `bam2mtx`'s crossbeam queue now guarantees at least 512 buffered chunks and relies on adaptive backoff polling, keeping producers responsive while avoiding send-side blocking.
 - **Aggressive Triplet Spilling (New):** The streaming matrix builder now uses a lower spill threshold (100K triplets, minimum 50K cap) to flush data to disk more frequently, dramatically reducing peak memory usage during large conversions.
+- **Depth-cap awareness (New):** `bulk` now marks any site whose filtered depth reaches the configured maximum as `NEAR_MAX_DEPTH`, complementing the existing 1% proximity heuristic and making depth clipping visible downstream.
 - **Streaming CSR materialisation (New):** Triplet runs are merged with a heap-based iterator that deduplicates row/column pairs on the fly, so final layer construction stays parallel-friendly and never loads all triplets into RAM at once.
 - **Enhanced Chunk Monitoring (New):** Each chunk logs position count, high-depth site count, and total weight, providing visibility into workload characteristics and helping diagnose memory-intensive regions.
 - **Reader pooling:** Each worker thread checks out an `IndexedReader` from a pool, avoiding reopen/seek penalties when iterating across genomic tiles.

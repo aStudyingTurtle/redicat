@@ -150,8 +150,13 @@ impl PileupPosition {
     /// Flag the position when observed depth is within 1% of the configured max depth.
     #[inline]
     pub fn mark_near_max_depth(&mut self, max_depth: u32) {
+        self.near_max_depth = false;
         if max_depth == 0 {
-            self.near_max_depth = false;
+            return;
+        }
+
+        if self.depth >= max_depth {
+            self.near_max_depth = true;
             return;
         }
 
@@ -219,8 +224,11 @@ mod tests {
         position.mark_near_max_depth(100_000);
         assert!(position.near_max_depth);
 
+        position.depth = 100_000;
+        position.mark_near_max_depth(100_000);
+        assert!(position.near_max_depth);
+
         position.depth = 98_500;
-        position.near_max_depth = true;
         position.mark_near_max_depth(100_000);
         assert!(!position.near_max_depth);
 

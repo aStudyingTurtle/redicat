@@ -6,6 +6,9 @@ use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
+/// Minimum buffer capacity used when chunking positions to avoid frequent reallocations.
+const MIN_CHUNK_BUFFER_CAPACITY: usize = 512;
+
 /// Represents a genomic position parsed from the TSV manifest.
 #[derive(Debug, Clone)]
 pub struct GenomicPosition {
@@ -235,7 +238,9 @@ pub fn chunk_positions(
 
     let normal_limit = chunk_size.max(1);
     let hotspot_limit = chunk_size_max_depth.max(1);
-    let base_capacity = normal_limit.max(hotspot_limit);
+    let base_capacity = normal_limit
+        .max(hotspot_limit)
+        .max(MIN_CHUNK_BUFFER_CAPACITY);
 
     let estimated_chunks = if hotspot_limit == 0 {
         positions.len()

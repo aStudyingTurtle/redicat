@@ -4,7 +4,7 @@ mod input;
 mod workflow;
 
 use anyhow::{anyhow, Result};
-use crossbeam::channel::bounded;
+use crossbeam::channel::{bounded, TrySendError};
 use log::info;
 use parking_lot::Mutex;
 use rayon::prelude::*;
@@ -25,6 +25,15 @@ pub use args::Bam2MtxArgs;
 use engine::{OptimizedChunkProcessor, SkippedSite};
 use input::{chunk_positions, filter_positions_by, read_positions, PositionChunk};
 use workflow::prepare_positions_file;
+
+/// Hard lower bound for the producer-consumer channel used by bam2mtx.
+const MIN_CHANNEL_CAPACITY: usize = 512;
+/// Number of spin-yield attempts before sleeping during backpressure handling.
+const SEND_BACKPRESSURE_YIELD_SPINS: usize = 12;
+/// Maximum sleep duration (ms) used while backing off on a full channel.
+const SEND_BACKPRESSURE_SLEEP_MAX_MS: u64 = 64;
+/// Initial sleep duration (ms) once we move past spin yielding.
+const SEND_BACKPRESSURE_SLEEP_BASE_MS: u64 = 1;
 
 /// Calculate adaptive channel capacity based on workload characteristics.
 ///
@@ -54,7 +63,7 @@ fn estimate_channel_capacity(
     let avg_chunk_memory_mb = (avg_weight * bytes_per_weight_unit) / (1024 * 1024);
 
     // Improved adaptive calculation
-    let min_capacity = 256;
+    let min_capacity = MIN_CHANNEL_CAPACITY;
     let max_capacity = 4096;
 
     // Base capacity: threads * 4 (better for high parallelism)
@@ -77,7 +86,54 @@ fn estimate_channel_capacity(
         .min(max_by_chunks)
         .min(max_capacity);
 
-    capacity
+    capacity.max(MIN_CHANNEL_CAPACITY)
+}
+
+fn send_with_backpressure<T: Send + 'static>(
+    sender: &crossbeam::channel::Sender<T>,
+    value: T,
+    chunk_idx: usize,
+) -> Result<()> {
+    let mut attempts = 0usize;
+    let mut payload = Some(value);
+
+    loop {
+        let msg = payload.take().expect("pending payload must be present");
+        match sender.try_send(msg) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Full(msg)) => {
+                payload = Some(msg);
+                attempts = attempts.saturating_add(1);
+                if attempts <= SEND_BACKPRESSURE_YIELD_SPINS {
+                    thread::yield_now();
+                    continue;
+                }
+
+                if attempts == SEND_BACKPRESSURE_YIELD_SPINS + 1 {
+                    log::debug!(
+                        "bam2mtx chunk {} waiting for AnnData writer (channel saturated)",
+                        chunk_idx
+                    );
+                }
+
+                let backoff_shift = attempts
+                    .saturating_sub(SEND_BACKPRESSURE_YIELD_SPINS + 1)
+                    .min(6);
+                let sleep_ms = SEND_BACKPRESSURE_SLEEP_BASE_MS
+                    .saturating_mul(1u64 << backoff_shift)
+                    .min(SEND_BACKPRESSURE_SLEEP_MAX_MS)
+                    .max(SEND_BACKPRESSURE_SLEEP_BASE_MS);
+
+                thread::sleep(Duration::from_millis(sleep_ms));
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(anyhow!(
+                    "failed to send chunk {}: AnnData writer disconnected",
+                    chunk_idx
+                ));
+            }
+        }
+    }
 }
 
 /// Entry point for the `bam2mtx` command.
@@ -242,7 +298,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     });
 
     // CRITICAL FIX: Properly manage sender lifetime to prevent channel deadlock
-    // 
+    //
     // The Problem:
     // - try_for_each_init gives each Rayon worker thread its own sender clone
     // - These per-thread clones persist in the thread pool even after parallel iteration completes
@@ -258,7 +314,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     {
         let sender_clone = sender.clone();
         let skipped_sites_clone = Arc::clone(&skipped_sites);
-        
+
         chunks.into_par_iter().enumerate().try_for_each_init(
             || (sender_clone.clone(), Arc::clone(&skipped_sites_clone)),
             |(tx, skipped_bucket), (idx, chunk)| -> Result<()> {
@@ -270,9 +326,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
                 }
                 let chunk_positions = data.len();
                 if chunk_positions > 0 {
-                    // Send with explicit error context including chunk index
-                    tx.send(data)
-                        .map_err(|_| anyhow!("failed to send chunk {}: receiver disconnected (writer thread may have panicked)", idx))?;
+                    send_with_backpressure(&tx, data, idx)?;
                     total_positions.fetch_add(chunk_positions, Ordering::Relaxed);
                 }
 
@@ -328,7 +382,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
                 Ok(())
             },
         )?;
-        
+
         // sender_clone drops here, cleaning up all per-thread clones from Rayon pool
     }
 
@@ -378,4 +432,27 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     info!("bam2mtx workflow finished in {:?}", start_time.elapsed());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_with_backpressure_succeeds_when_capacity_frees() {
+        let (tx, rx) = bounded::<Vec<i32>>(1);
+        tx.send(vec![1]).unwrap();
+
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(5));
+            rx.recv().unwrap();
+            // Simulate the writer freeing a slot, then consuming the next payload
+            thread::sleep(Duration::from_millis(5));
+            rx.recv().unwrap();
+        });
+
+        send_with_backpressure(&tx, vec![2], 42).expect("backpressure send should succeed");
+        drop(tx);
+        handle.join().unwrap();
+    }
 }

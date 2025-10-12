@@ -29,6 +29,9 @@ use std::os::unix::fs::FileExt;
 #[cfg(windows)]
 use std::os::windows::fs::FileExt;
 
+/// Lower bound for per-layer buffer allocations to keep ingestion efficient.
+const MIN_STREAM_BUFFER_CAPACITY: usize = 512;
+
 /// Configuration options for AnnData conversion.
 #[derive(Debug, Clone)]
 pub struct AnnDataConfig {
@@ -518,11 +521,12 @@ impl StreamingMatrixBuilder {
                 .context("failed to build AnnData sorting thread pool")?,
         );
 
+        let layer_capacity = config.chunk_size.max(MIN_STREAM_BUFFER_CAPACITY);
         let forward_buffers = [
-            Vec::with_capacity(config.chunk_size),
-            Vec::with_capacity(config.chunk_size),
-            Vec::with_capacity(config.chunk_size),
-            Vec::with_capacity(config.chunk_size),
+            Vec::with_capacity(layer_capacity),
+            Vec::with_capacity(layer_capacity),
+            Vec::with_capacity(layer_capacity),
+            Vec::with_capacity(layer_capacity),
         ];
         let forward_spools = [
             TripletSpool::new(Arc::clone(&sort_pool))?,
@@ -533,10 +537,10 @@ impl StreamingMatrixBuilder {
 
         let (reverse_buffers, reverse_spools) = if config.stranded {
             let buffers = [
-                Vec::with_capacity(config.chunk_size),
-                Vec::with_capacity(config.chunk_size),
-                Vec::with_capacity(config.chunk_size),
-                Vec::with_capacity(config.chunk_size),
+                Vec::with_capacity(layer_capacity),
+                Vec::with_capacity(layer_capacity),
+                Vec::with_capacity(layer_capacity),
+                Vec::with_capacity(layer_capacity),
             ];
             let spools = [
                 TripletSpool::new(Arc::clone(&sort_pool))?,
