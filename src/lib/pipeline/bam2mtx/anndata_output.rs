@@ -19,10 +19,15 @@ use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::convert::TryInto;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
+
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 
 /// Configuration options for AnnData conversion.
 #[derive(Debug, Clone)]
@@ -202,7 +207,8 @@ impl Triplet {
 }
 
 struct TripletSpool {
-    file: NamedTempFile,
+    _file: NamedTempFile,
+    reader: Arc<std::fs::File>,
     writer: BufWriter<std::fs::File>,
     runs: Vec<RunMeta>,
     bytes_written: u64,
@@ -218,11 +224,13 @@ struct RunMeta {
 impl TripletSpool {
     fn new(sort_pool: Arc<ThreadPool>) -> Result<Self> {
         let file = NamedTempFile::new()?;
+        let reader_handle = Arc::new(file.reopen()?);
         let mut writer_handle = file.reopen()?;
         writer_handle.seek(SeekFrom::End(0))?;
         let writer = BufWriter::with_capacity(1 << 20, writer_handle);
         Ok(Self {
-            file,
+            _file: file,
+            reader: reader_handle,
             writer,
             runs: Vec::new(),
             bytes_written: 0,
@@ -308,20 +316,55 @@ struct TripletStream {
 }
 
 struct RunState {
-    reader: BufReader<std::fs::File>,
+    file: Arc<std::fs::File>,
+    next_offset: u64,
     remaining: usize,
+    buffer: Vec<u8>,
+    buffer_pos: usize,
+    buffer_len: usize,
 }
 
 impl RunState {
     fn read_next(&mut self) -> Result<Option<Triplet>> {
-        if self.remaining == 0 {
-            return Ok(None);
+        if self.buffer_pos >= self.buffer_len {
+            self.fill_buffer()?;
+            if self.buffer_len == 0 {
+                return Ok(None);
+            }
         }
 
-        let mut buf = [0u8; 12];
-        self.reader.read_exact(&mut buf)?;
-        self.remaining -= 1;
-        Ok(Some(Triplet::from_bytes(&buf)))
+        let chunk = &self.buffer[self.buffer_pos..self.buffer_pos + 12];
+        self.buffer_pos += 12;
+
+        let bytes: [u8; 12] = chunk.try_into().expect("triplet buffer slice length");
+        Ok(Some(Triplet::from_bytes(&bytes)))
+    }
+
+    fn fill_buffer(&mut self) -> Result<()> {
+        if self.remaining == 0 {
+            self.buffer_len = 0;
+            self.buffer_pos = 0;
+            return Ok(());
+        }
+
+        const TRIPLETS_PER_READ: usize = 8192;
+        const BYTES_PER_TRIPLET: usize = 12;
+
+        let to_read = self.remaining.min(TRIPLETS_PER_READ);
+        let byte_len = to_read * BYTES_PER_TRIPLET;
+
+        if self.buffer.len() < byte_len {
+            self.buffer.resize(byte_len, 0);
+        }
+
+        read_exact_shared(&self.file, &mut self.buffer[..byte_len], self.next_offset)
+            .context("failed to read spill run data")?;
+
+        self.next_offset += byte_len as u64;
+        self.remaining -= to_read;
+        self.buffer_pos = 0;
+        self.buffer_len = byte_len;
+        Ok(())
     }
 }
 
@@ -358,17 +401,20 @@ impl TripletStream {
     fn new(spool: &TripletSpool) -> Result<Self> {
         let mut runs = Vec::with_capacity(spool.runs.len());
         let mut heap = BinaryHeap::new();
+        let file = Arc::clone(&spool.reader);
 
         for meta in spool.runs.iter() {
             if meta.len == 0 {
                 continue;
             }
 
-            let mut file = spool.file.reopen()?;
-            file.seek(SeekFrom::Start(meta.offset))?;
             let mut run_state = RunState {
-                reader: BufReader::with_capacity(1 << 20, file),
+                file: Arc::clone(&file),
+                next_offset: meta.offset,
                 remaining: meta.len,
+                buffer: Vec::new(),
+                buffer_pos: 0,
+                buffer_len: 0,
             };
 
             if let Some(first) = run_state.read_next()? {
@@ -398,6 +444,30 @@ impl TripletStream {
         }
 
         Ok(Some(triplet))
+    }
+}
+
+fn read_exact_shared(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        file.read_exact_at(buf, offset)
+    }
+
+    #[cfg(windows)]
+    {
+        let mut read = 0usize;
+        while read < buf.len() {
+            let slice = &mut buf[read..];
+            let count = file.seek_read(slice, offset + read as u64)?;
+            if count == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "unexpected EOF while reading spill file",
+                ));
+            }
+            read += count;
+        }
+        Ok(())
     }
 }
 
