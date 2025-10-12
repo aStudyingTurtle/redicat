@@ -53,25 +53,29 @@ fn estimate_channel_capacity(
     let bytes_per_weight_unit = 200_u64; // Conservative estimate
     let avg_chunk_memory_mb = (avg_weight * bytes_per_weight_unit) / (1024 * 1024);
 
-    // Base capacity: threads * 2 (producer-consumer pattern)
-    let base_capacity = threads.saturating_mul(2);
+    // Improved adaptive calculation
+    let min_capacity = 256;
+    let max_capacity = 4096;
 
-    // Maximum by memory: don't use more than 10% of available memory for buffering
+    // Base capacity: threads * 4 (better for high parallelism)
+    let base_capacity = threads.saturating_mul(4);
+
+    // Maximum by memory: use up to 20% of available memory for buffering
     let max_by_memory = if avg_chunk_memory_mb > 0 {
-        ((available_memory_gb * 1024 * 10) / 100 / avg_chunk_memory_mb) as usize
+        ((available_memory_gb * 1024 * 20) / 100 / avg_chunk_memory_mb) as usize
     } else {
         base_capacity * 4
     };
 
-    // Maximum by chunk count: don't buffer more than 25% of total chunks
-    let max_by_chunks = chunks.len() / 4;
+    // Maximum by chunk count: don't buffer more than 33% of total chunks
+    let max_by_chunks = (chunks.len() as f64 * 0.33).ceil() as usize;
 
-    // Choose the minimum of all constraints, but at least base_capacity
+    // Choose the minimum of all constraints, but at least min_capacity
     let capacity = base_capacity
-        .max(8) // Minimum 8 to avoid thrashing
+        .max(min_capacity)
         .min(max_by_memory)
         .min(max_by_chunks)
-        .min(1024); // Hard cap at 1024 to prevent excessive memory
+        .min(max_capacity);
 
     capacity
 }
@@ -237,11 +241,24 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
         Ok(())
     });
 
-    // CRITICAL FIX: Ensure all sender clones are dropped before waiting for writer thread
-    // Use a scoped block to guarantee cleanup of all sender clones from Rayon threads
+    // CRITICAL FIX: Properly manage sender lifetime to prevent channel deadlock
+    // 
+    // The Problem:
+    // - try_for_each_init gives each Rayon worker thread its own sender clone
+    // - These per-thread clones persist in the thread pool even after parallel iteration completes
+    // - The writer thread waits for ALL senders to be dropped before closing the channel
+    // - If sender clones remain alive in Rayon's thread pool, the writer never sees EOF
+    // - This causes deadlock: producers done but writer waiting, or channel disconnect errors
+    //
+    // The Solution:
+    // - Create an intermediate sender_clone in an explicit scope
+    // - Pass this clone to try_for_each_init instead of the original sender
+    // - When scope ends, sender_clone drops, ensuring all thread-local clones also drop
+    // - Then drop the original sender to signal EOF to the writer
     {
         let sender_clone = sender.clone();
         let skipped_sites_clone = Arc::clone(&skipped_sites);
+        
         chunks.into_par_iter().enumerate().try_for_each_init(
             || (sender_clone.clone(), Arc::clone(&skipped_sites_clone)),
             |(tx, skipped_bucket), (idx, chunk)| -> Result<()> {
@@ -253,8 +270,9 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
                 }
                 let chunk_positions = data.len();
                 if chunk_positions > 0 {
+                    // Send with explicit error context including chunk index
                     tx.send(data)
-                        .map_err(|err| anyhow!("failed to send chunk {idx}: {err}"))?;
+                        .map_err(|_| anyhow!("failed to send chunk {}: receiver disconnected (writer thread may have panicked)", idx))?;
                     total_positions.fetch_add(chunk_positions, Ordering::Relaxed);
                 }
 
@@ -310,10 +328,11 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
                 Ok(())
             },
         )?;
-        // sender_clone is dropped here when the scope ends
+        
+        // sender_clone drops here, cleaning up all per-thread clones from Rayon pool
     }
 
-    // Now drop the original sender - this ensures ALL senders are dropped
+    // Now drop the original sender to signal EOF to writer thread
     drop(sender);
     info!("All chunk senders dropped, waiting for writer thread to complete...");
 
