@@ -25,7 +25,7 @@ opt-level = 3
 # lto = "thin"
 lto = "fat"
 codegen-units = 1
-debug = true     # Remove debug info
+debug = false     # Remove debug info
 panic = "unwind"   # Smaller binary, slightly faster
 
 [lib]
