@@ -125,7 +125,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     let total_positions = AtomicUsize::new(0);
     let near_max_remaining = AtomicUsize::new(total_near_max_positions);
     let long_report_interval = Duration::from_secs(1800);
-    let last_long_report = AtomicU64::new(0);
+    let last_timed_report_secs = AtomicU64::new(0);
     let last_percent_bucket = AtomicUsize::new(0);
 
     let chunk_results = chunks
@@ -158,8 +158,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
                         / total_chunks.max(1) as f64;
                     let bucket = ((percent / 5.0).floor() as usize).min(20);
 
-                    let mut should_log = false;
-
+                    let mut percent_log_due = false;
                     if completed < total_chunks {
                         let previous = last_percent_bucket.load(Ordering::Relaxed);
                         if bucket > previous
@@ -172,16 +171,17 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
                                 )
                                 .is_ok()
                         {
-                            should_log = true;
+                            percent_log_due = true;
                         }
                     }
 
-                    if !should_log {
-                        let last_marker = last_long_report.load(Ordering::Relaxed);
+                    let mut timed_log_due = false;
+                    if completed < total_chunks {
+                        let last_marker = last_timed_report_secs.load(Ordering::Relaxed);
                         if elapsed_secs
                             .saturating_sub(last_marker)
                             >= long_report_interval.as_secs()
-                            && last_long_report
+                            && last_timed_report_secs
                                 .compare_exchange(
                                     last_marker,
                                     elapsed_secs,
@@ -190,12 +190,11 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
                                 )
                                 .is_ok()
                         {
-                            should_log = completed < total_chunks;
+                            timed_log_due = true;
                         }
                     }
 
-                    if should_log {
-                        last_long_report.store(elapsed_secs, Ordering::Relaxed);
+                    if percent_log_due || timed_log_due {
                         info!(
                             "Processed {:.1}% ({} / {} chunks, {} near-max-depth positions remaining)",
                             percent,

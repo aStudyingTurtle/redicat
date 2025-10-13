@@ -70,12 +70,12 @@ pub struct Bam2MtxArgs {
     pub reference: Option<PathBuf>,
 
     /// Chunk size for parallel processing (weight budget for normal positions). Default: 100_000
-    #[structopt(long, default_value = "1000000", short = "c")]
+    #[structopt(long, default_value = "100000", short = "c")]
     pub chunksize: u32,
 
     /// Chunk size applied to high-depth loci marked by `NEAR_MAX_DEPTH` in the TSV.
-    /// Default: 1
-    #[structopt(long = "chunk-size-max-depth", default_value = "5")]
+    /// Default: 2
+    #[structopt(long = "chunk-size-max-depth", default_value = "2")]
     pub chunk_size_max_depth: u32,
 
     /// Matrix density estimate used to pre-size sparse buffers.
@@ -123,8 +123,8 @@ mod tests {
         assert_eq!(args.tsv, Some(PathBuf::from("test.tsv")));
         assert_eq!(args.barcodes, PathBuf::from("barcodes.tsv"));
         assert_eq!(args.output, PathBuf::from("output.h5ad"));
-    assert_eq!(args.max_depth, 655_360);
-    assert_eq!(args.chunk_size_max_depth, 5);
+        assert_eq!(args.max_depth, 655_360);
+        assert_eq!(args.chunk_size_max_depth, 2);
         assert!(!args.two_pass);
     }
 }

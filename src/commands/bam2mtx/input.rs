@@ -15,7 +15,9 @@ pub struct GenomicPosition {
     pub chrom: String,
     pub pos: u64,
     pub depth: u32,
+    #[allow(dead_code)] // Retained for manifest fidelity and weight experiments
     pub ins: u32,
+    #[allow(dead_code)] // Retained for manifest fidelity and weight experiments
     pub del: u32,
     pub ref_skip: u32,
     pub fail: u32,
@@ -301,11 +303,9 @@ pub fn chunk_positions(
             current_near = current_near.saturating_add(1);
         }
 
-        // Calculate the weight for this position: DEPTH + INS + DEL + REF_SKIP + FAIL
+        // Calculate the weight for this position: DEPTH + REF_SKIP + FAIL
         let position_weight = if current_kind == ChunkKind::Normal {
             (position.depth as usize)
-                .saturating_add(position.ins as usize)
-                .saturating_add(position.del as usize)
                 .saturating_add(position.ref_skip as usize)
                 .saturating_add(position.fail as usize)
                 .max(1)
@@ -462,7 +462,7 @@ mod tests {
                 let total_weight: usize = chunk
                     .positions
                     .iter()
-                    .map(|p| (p.depth + p.ins + p.del + p.ref_skip + p.fail) as usize)
+                    .map(|p| (p.depth + p.ref_skip + p.fail) as usize)
                     .sum();
                 assert!(total_weight <= 4);
                 assert_eq!(chunk.near_max_depth_count(), 0);
@@ -517,28 +517,28 @@ mod tests {
 
         let chunks = chunk_positions(positions, 10, 2);
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].positions.len(), 2); // First two positions: weight 6 + 4 = 10
-        assert_eq!(chunks[1].positions.len(), 2); // Last two positions: weight 5 + 7 = 12
+        assert_eq!(chunks[0].positions.len(), 3); // First three positions: weight 5 + 3 + 5 = 13
+        assert_eq!(chunks[1].positions.len(), 1); // Final position: weight 7
         assert_eq!(chunks[0].near_max_depth_count(), 0);
         assert_eq!(chunks[1].near_max_depth_count(), 0);
 
         let first_weights: usize = chunks[0]
             .positions
             .iter()
-            .map(|p| (p.depth + p.ins + p.del + p.ref_skip + p.fail) as usize)
+            .map(|p| (p.depth + p.ref_skip + p.fail) as usize)
             .sum();
-        assert!(first_weights >= 10);
+        assert_eq!(first_weights, 13);
         let second_weights: usize = chunks[1]
             .positions
             .iter()
-            .map(|p| (p.depth + p.ins + p.del + p.ref_skip + p.fail) as usize)
+            .map(|p| (p.depth + p.ref_skip + p.fail) as usize)
             .sum();
-        assert!(second_weights < 20);
+        assert_eq!(second_weights, 7);
     }
 
     #[test]
-    fn chunk_positions_uses_comprehensive_weight() {
-        // Test that the weight calculation includes all components
+    fn chunk_positions_weights_use_depth_skip_fail_only() {
+        // Verify that only DEPTH + REF_SKIP + FAIL contribute to the normal chunk budget
         let positions = vec![
             GenomicPosition {
                 chrom: "chr3".to_string(),
@@ -563,52 +563,39 @@ mod tests {
             GenomicPosition {
                 chrom: "chr3".to_string(),
                 pos: 102,
-                depth: 5,
-                ins: 0,
-                del: 0,
+                depth: 8,
+                ins: 5,
+                del: 5,
                 ref_skip: 0,
-                fail: 0,
+                fail: 2,
                 near_max_depth: false,
             },
         ];
 
-        // First position has weight: 10 + 2 + 3 + 1 + 4 = 20
-        // Second position has weight: 15 + 1 + 1 + 2 + 1 = 20
-        // Third position has weight: 5
-        // With chunksize=25:
-        //   - First position added: weight = 20 < 25, continue
-        //   - Second position added: weight = 40 >= 25, flush (both in chunk 1)
-        //   - Third position starts chunk 2: weight = 5
-        let chunks = chunk_positions(positions, 25, 10);
-        assert_eq!(chunks.len(), 2, "Should create 2 chunks");
-        assert_eq!(
-            chunks[0].positions.len(),
-            2,
-            "First chunk should have 2 positions"
-        );
-        assert_eq!(
-            chunks[1].positions.len(),
-            1,
-            "Second chunk should have 1 position"
-        );
+        let chunks = chunk_positions(positions.clone(), 30, 2);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].positions.len(), 2);
+        assert_eq!(chunks[1].positions.len(), 1);
 
-        // Verify first chunk weight includes all components
-        let first_weight: usize = chunks[0]
+        let expected_first = (positions[0].depth + positions[0].ref_skip + positions[0].fail
+            + positions[1].depth + positions[1].ref_skip + positions[1].fail) as usize;
+        let first_chunk_weight: usize = chunks[0]
             .positions
             .iter()
-            .map(|p| (p.depth + p.ins + p.del + p.ref_skip + p.fail) as usize)
+            .map(|p| (p.depth + p.ref_skip + p.fail) as usize)
             .sum();
-        assert_eq!(
-            first_weight, 40,
-            "First chunk weight should be 40 (20 + 20)"
-        );
+        assert_eq!(first_chunk_weight, expected_first);
 
-        // Verify second chunk weight
-        let second_weight: usize = chunks[1]
+        let expected_third = (positions[2].depth + positions[2].ref_skip + positions[2].fail) as usize;
+        let last_chunk_weight: usize = chunks[1]
             .positions
             .iter()
-            .map(|p| (p.depth + p.ins + p.del + p.ref_skip + p.fail) as usize)
+            .map(|p| (p.depth + p.ref_skip + p.fail) as usize)
             .sum();
-        assert_eq!(second_weight, 5, "Second chunk weight should be 5");
+        assert_eq!(last_chunk_weight, expected_third);
+
+        let legacy_weight = (positions[2].depth + positions[2].ins + positions[2].del
+            + positions[2].ref_skip + positions[2].fail) as usize;
+        assert_ne!(last_chunk_weight, legacy_weight);
     }
 }

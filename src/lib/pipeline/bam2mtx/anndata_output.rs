@@ -127,8 +127,7 @@ impl AnnDataConverter {
         let total_positions: usize = chunks.iter().map(|c| c.len()).sum();
         info!(
             "convert_parallel_chunks: flattening {} positions across {} batches",
-            total_positions,
-            chunk_count
+            total_positions, chunk_count
         );
         let flatten_start = Instant::now();
         let mut flattened = Vec::with_capacity(total_positions);
@@ -942,10 +941,13 @@ fn assemble_parallel_parts(
                 acc
             },
         )
-        .reduce(|| FxHashSet::default(), |mut left, right| {
-            left.extend(right.into_iter());
-            left
-        });
+        .reduce(
+            || FxHashSet::default(),
+            |mut left, right| {
+                left.extend(right.into_iter());
+                left
+            },
+        );
 
     let mut observed: Vec<u32> = observed_cells.into_iter().collect();
     observed.sort_unstable();
@@ -993,7 +995,8 @@ fn assemble_parallel_parts(
         })
         .collect();
 
-    let mut position_lookup = FxHashMap::with_capacity_and_hasher(position_keys.len(), Default::default());
+    let mut position_lookup =
+        FxHashMap::with_capacity_and_hasher(position_keys.len(), Default::default());
     for (idx, key) in position_keys.iter().enumerate() {
         position_lookup.insert(*key, idx as u32);
     }
@@ -1026,8 +1029,7 @@ fn assemble_parallel_parts(
             },
         )?;
 
-    let (forward_layers, reverse_layers) =
-        accumulator.finish(n_rows, n_cols, config.stranded)?;
+    let (forward_layers, reverse_layers) = accumulator.finish(n_rows, n_cols, config.stranded)?;
 
     Ok(StreamingAnnDataParts {
         cell_names,
@@ -1429,15 +1431,14 @@ mod tests {
         }
         let streaming_parts = builder.finalize()?;
 
-        let parallel_parts = assemble_parallel_parts(
-            &config,
-            &barcode_processor,
-            &contig_names,
-            &data,
-        )?;
+        let parallel_parts =
+            assemble_parallel_parts(&config, &barcode_processor, &contig_names, &data)?;
 
         assert_eq!(streaming_parts.cell_names, parallel_parts.cell_names);
-        assert_eq!(streaming_parts.position_names, parallel_parts.position_names);
+        assert_eq!(
+            streaming_parts.position_names,
+            parallel_parts.position_names
+        );
 
         let streaming_forward: Vec<Vec<(usize, usize, f32)>> = streaming_parts
             .forward_layers

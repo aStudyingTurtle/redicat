@@ -93,7 +93,19 @@ impl RegionProcessor for BaseProcessor {
                 self.min_baseq,
             );
             pos.pos += self.coord_base;
-            pos.mark_near_max_depth(self.max_depth);
+
+            if self.max_depth > 0 {
+                let combined_depth = pos
+                    .depth
+                    .saturating_add(pos.ref_skip)
+                    .saturating_add(pos.fail);
+                let effective_depth = combined_depth.max(pos.depth);
+                let lhs = (effective_depth as u64).saturating_mul(101);
+                let rhs = (self.max_depth as u64).saturating_mul(100);
+                pos.near_max_depth = lhs >= rhs;
+            } else {
+                pos.near_max_depth = false;
+            }
 
             let should_include = if self.edited_mode {
                 let valid_value = max(pos.depth / self.editing_threshold, 2);
