@@ -244,7 +244,12 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
         "Assembling sparse matrices from {} result batches...",
         position_batches.len()
     );
+    let parallel_assembly_start = Instant::now();
     let adata = converter.convert_parallel_chunks(position_batches, &output_path)?;
+    info!(
+        "Sparse matrix assembly completed in {:?}",
+        parallel_assembly_start.elapsed()
+    );
     converter.write_to_file(&adata, &output_path)?;
     info!("AnnData write finished -> {:?}", output_path);
 

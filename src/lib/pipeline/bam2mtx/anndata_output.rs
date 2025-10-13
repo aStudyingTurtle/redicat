@@ -22,6 +22,7 @@ use std::convert::TryInto;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use tempfile::NamedTempFile;
 
 #[cfg(unix)]
@@ -122,12 +123,30 @@ impl AnnDataConverter {
         mut chunks: Vec<Vec<PositionData>>,
         output_path: &Path,
     ) -> Result<AnnData<H5>> {
+        let chunk_count = chunks.len();
         let total_positions: usize = chunks.iter().map(|c| c.len()).sum();
+        info!(
+            "convert_parallel_chunks: flattening {} positions across {} batches",
+            total_positions,
+            chunk_count
+        );
+        let flatten_start = Instant::now();
         let mut flattened = Vec::with_capacity(total_positions);
         for mut chunk in chunks.drain(..) {
             flattened.append(&mut chunk);
         }
-        self.convert_parallel(&flattened, output_path)
+        info!(
+            "convert_parallel_chunks: flattening finished in {:?}",
+            flatten_start.elapsed()
+        );
+
+        let assemble_start = Instant::now();
+        let adata = self.convert_parallel(&flattened, output_path)?;
+        info!(
+            "convert_parallel_chunks: sparse assembly finished in {:?}",
+            assemble_start.elapsed()
+        );
+        Ok(adata)
     }
 
     /// Convert an in-memory collection of [`PositionData`] using the parallel sparse assembler.
