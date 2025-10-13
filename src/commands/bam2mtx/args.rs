@@ -54,7 +54,7 @@ pub struct Bam2MtxArgs {
     pub stranded: bool,
 
     /// Maximum pileup depth to examine per site.
-    #[structopt(long = "max-depth", default_value = "65536", short = "D")]
+    #[structopt(long = "max-depth", default_value = "655360", short = "D")]
     pub max_depth: u32,
 
     /// UMI tag name.
@@ -75,7 +75,7 @@ pub struct Bam2MtxArgs {
 
     /// Chunk size applied to high-depth loci marked by `NEAR_MAX_DEPTH` in the TSV.
     /// Default: 1
-    #[structopt(long = "chunk-size-max-depth", default_value = "15")]
+    #[structopt(long = "chunk-size-max-depth", default_value = "5")]
     pub chunk_size_max_depth: u32,
 
     /// Matrix density estimate used to pre-size sparse buffers.
@@ -123,8 +123,8 @@ mod tests {
         assert_eq!(args.tsv, Some(PathBuf::from("test.tsv")));
         assert_eq!(args.barcodes, PathBuf::from("barcodes.tsv"));
         assert_eq!(args.output, PathBuf::from("output.h5ad"));
-        assert_eq!(args.max_depth, 65_536);
-    assert_eq!(args.chunk_size_max_depth, 15);
+    assert_eq!(args.max_depth, 655_360);
+    assert_eq!(args.chunk_size_max_depth, 5);
         assert!(!args.two_pass);
     }
 }

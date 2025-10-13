@@ -123,10 +123,10 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     let total_chunks = chunks.len();
     let processed_chunks = AtomicUsize::new(0);
     let total_positions = AtomicUsize::new(0);
-    let log_step = usize::max(1, total_chunks.max(1) / 20);
     let near_max_remaining = AtomicUsize::new(total_near_max_positions);
     let long_report_interval = Duration::from_secs(1800);
     let last_long_report = AtomicU64::new(0);
+    let last_percent_bucket = AtomicUsize::new(0);
 
     let chunk_results = chunks
         .into_par_iter()
@@ -150,42 +150,58 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
                 };
 
                 let completed = processed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
-                let percent = if completed < total_chunks {
-                    let scaled = (completed as f64 * 1000.0)
-                        / total_chunks.max(1) as f64;
-                    (scaled.floor()) / 10.0
-                } else {
-                    100.0
-                };
-                if completed == total_chunks || completed.is_multiple_of(log_step) {
-                    info!(
-                        "Processed {:.1}% ({} / {} chunks, {} near-max-depth positions remaining)",
-                        percent,
-                        completed,
-                        total_chunks,
-                        near_remaining
-                    );
-                }
-
                 let elapsed = processing_start.elapsed();
                 let elapsed_secs = elapsed.as_secs();
-                let last_marker = last_long_report.load(Ordering::Relaxed);
-                if elapsed_secs.saturating_sub(last_marker) >= long_report_interval.as_secs() {
-                    if last_long_report
-                        .compare_exchange(
-                            last_marker,
-                            elapsed_secs,
-                            Ordering::Relaxed,
-                            Ordering::Relaxed,
-                        )
-                        .is_ok()
-                    {
-                        let remaining_chunks = total_chunks.saturating_sub(completed);
+
+                if total_chunks > 0 {
+                    let percent = (completed as f64 * 100.0)
+                        / total_chunks.max(1) as f64;
+                    let bucket = ((percent / 5.0).floor() as usize).min(20);
+
+                    let mut should_log = false;
+
+                    if completed < total_chunks {
+                        let previous = last_percent_bucket.load(Ordering::Relaxed);
+                        if bucket > previous
+                            && last_percent_bucket
+                                .compare_exchange(
+                                    previous,
+                                    bucket,
+                                    Ordering::Relaxed,
+                                    Ordering::Relaxed,
+                                )
+                                .is_ok()
+                        {
+                            should_log = true;
+                        }
+                    }
+
+                    if !should_log {
+                        let last_marker = last_long_report.load(Ordering::Relaxed);
+                        if elapsed_secs
+                            .saturating_sub(last_marker)
+                            >= long_report_interval.as_secs()
+                            && last_long_report
+                                .compare_exchange(
+                                    last_marker,
+                                    elapsed_secs,
+                                    Ordering::Relaxed,
+                                    Ordering::Relaxed,
+                                )
+                                .is_ok()
+                        {
+                            should_log = completed < total_chunks;
+                        }
+                    }
+
+                    if should_log {
+                        last_long_report.store(elapsed_secs, Ordering::Relaxed);
                         info!(
-                            "Long-running status: {} chunks remaining, {} near-max-depth positions pending (elapsed {:?})",
-                            remaining_chunks,
-                            near_remaining,
-                            elapsed
+                            "Processed {:.1}% ({} / {} chunks, {} near-max-depth positions remaining)",
+                            percent,
+                            completed,
+                            total_chunks,
+                            near_remaining
                         );
                     }
                 }
@@ -201,6 +217,8 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
                 Ok(acc)
             },
         )?;
+
+    info!("Processed 100.0%");
 
     info!(
         "Chunk traversal finished in {:?} ({} positions)",

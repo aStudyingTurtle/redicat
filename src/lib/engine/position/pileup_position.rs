@@ -155,15 +155,18 @@ impl PileupPosition {
             return;
         }
 
-        if self.depth >= max_depth {
-            self.near_max_depth = true;
-            return;
-        }
+        let combined_depth = self
+            .depth
+            .saturating_add(self.ref_skip)
+            .saturating_add(self.fail);
+        // Use the smaller of the raw pileup depth (including REF_SKIP/FAIL) and the filtered
+        // depth to remain consistent with the exported TSV columns (`DEPTH`, `REF_SKIP`, `FAIL`).
+        let effective_depth = combined_depth.min(self.depth);
 
-        let tolerance = ((max_depth as u64) + 99) / 100;
-        let threshold = max_depth.saturating_sub(tolerance as u32);
+        let lhs = (effective_depth as u128).saturating_mul(101);
+        let rhs = (max_depth as u128).saturating_mul(100);
 
-        self.near_max_depth = self.depth >= threshold;
+        self.near_max_depth = lhs >= rhs;
     }
 
     /// Convert a pileup into a `Position`.

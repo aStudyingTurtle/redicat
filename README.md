@@ -16,7 +16,7 @@ If REDICAT supports your research, please cite:
 - **Dynamic Rayon work queue:** `ParGranges` now flattens genomic tiles into a global work queue so `bulk` keeps every core busy even when only a handful of contigs remain in flight.
 - **Parallel AnnData assembly:** `bam2mtx` now collects per-thread chunk results, merges them with a parallel sparse assembler, and writes `.h5ad` outputs without a single threaded bottleneck or extra global channels.
 - **Run-aware sparse merging (New):** The AnnData converter now persists sorted triplet runs to disk and performs a streaming multi-way merge when finalising CSR layers, keeping peak RSS close to the sparse output size and preventing the single-threaded 30+ minute stall that previously occurred after "Processed 100%" log events.
-- **Depth-aware chunking:** `bam2mtx` streams TSV manifests with Polars, accumulates position weights (`DEPTH + INS + DEL + REF_SKIP + FAIL`) until the `--chunksize` budget is spent, and automatically falls back to the hotspot-friendly `--chunk-size-max-depth` batches (default 15) whenever `NEAR_MAX_DEPTH=true`.
+- **Depth-aware chunking:** `bam2mtx` streams TSV manifests with Polars, accumulates position weights (`DEPTH + INS + DEL + REF_SKIP + FAIL`) until the `--chunksize` budget is spent, and automatically falls back to the hotspot-friendly `--chunk-size-max-depth` batches (default 5) whenever `NEAR_MAX_DEPTH=true`.
 - **Local-time observability:** Console logs now emit system time zone timestamps and 30-minute status beacons that report remaining chunks alongside outstanding `NEAR_MAX_DEPTH` loci for long-running jobs.
 - **Depth-cap skip audit:** Any site whose pileup depth meets or exceeds `--max-depth` is skipped before UMI aggregation, recorded to a sibling `<name>_skiped_sites.txt` manifest, and summarised in the final log output for easy triage.
 - **Layered architecture:** The library is split into `core` (shared utilities & sparse ops), `engine` (parallel schedulers and position primitives), and `pipeline` (bam2mtx & call workflows), keeping reusable pieces lightweight and testable.
@@ -135,13 +135,13 @@ Option reference:
 | `-d`  | `--min-depth`         | Minimum non-`N` coverage to keep a site.                       | `10`     |
 | `-n`  | `--max-n-fraction`    | Maximum tolerated ambiguous fraction (depth / value).          | `20`     |
 | `-et` | `--editing-threshold` | Ensures at least two bases exceed `depth / editing-threshold`. | `1000`   |
-| `-D`  | `--max-depth`         | Cap on pileup traversal depth during matrix assembly (default 65,536). Sites with depth ≥ cap are skipped, logged, and mirrored to `<output>_skiped_sites.txt`.         | `65536`  |
+| `-D`  | `--max-depth`         | Cap on pileup traversal depth during matrix assembly (default 655,360). Sites with depth ≥ cap are skipped, logged, and mirrored to `<output>_skiped_sites.txt`.         | `655360`  |
 | `-S`  | `--stranded`          | Treat UMIs as strand-aware.                                    | `false`  |
 | —     | `--umi-tag`           | BAM tag containing UMI sequence.                               | `UB`     |
 | —     | `--cb-tag`            | BAM tag containing cell barcode.                               | `CB`     |
 | `-r`  | `--reference`         | Reference FASTA (required for CRAM).                           | optional |
 | `-c`  | `--chunksize`         | Genomic position weight budget per processing chunk (applied to standard loci). | `1000000` |
-| —     | `--chunk-size-max-depth` | Maximum hotspot chunk length when `NEAR_MAX_DEPTH` is `true` in the TSV. **Updated default to 15 for balanced hotspot throughput.** | `15`     |
+| —     | `--chunk-size-max-depth` | Maximum hotspot chunk length when `NEAR_MAX_DEPTH` is `true` in the TSV. **Updated default to 5 for balanced hotspot throughput.** | `5`     |
 | —     | `--matrix-density`    | Hint for CSR buffer sizing.                                    | `0.005`  |
 | `-A`  | `--allcontigs`        | Include decoys and noncanonical contigs.                       | `false`  |
 
@@ -163,7 +163,7 @@ Important options:
 - **Enhanced Chunk Monitoring (New):** Each chunk logs position count, high-depth site count, and total weight, providing visibility into workload characteristics and helping diagnose memory-intensive regions.
 - **Reader pooling:** Each worker thread checks out an `IndexedReader` from a pool, avoiding reopen/seek penalties when iterating across genomic tiles.
 - **Triplet batching:** Sparse matrices are assembled from thread-local batches of `(row, col, value)` triplets, eliminating cross-thread contention, and the final merge operates fully in parallel without an intermediate channel stage.
-- **Adaptive chunking:** Dual CLI knobs (`--chunksize` for the depth-weighted standard loci budget and `--chunk-size-max-depth` for hotspot batch caps, now defaulting to 15) govern the parallel granularity for `bam2mtx` (and the batch size for AnnData writes), while the refactored `ParGranges` scheduler flattens tiles into a single Rayon queue so `bulk` honors `--chunksize` without serial bottlenecks.
+- **Adaptive chunking:** Dual CLI knobs (`--chunksize` for the depth-weighted standard loci budget and `--chunk-size-max-depth` for hotspot batch caps, now defaulting to 5) govern the parallel granularity for `bam2mtx` (and the batch size for AnnData writes), while the refactored `ParGranges` scheduler flattens tiles into a single Rayon queue so `bulk` honors `--chunksize` without serial bottlenecks.
 - **Chunk-level fetch & depth guards:** `bam2mtx` batches contiguous sites per contig, records observed depth, and—in `--two-pass` mode—relies on a first-pass `bulk` run capped at `--max-depth 8000` plus in-run pileup guards to prune oversaturated loci before dense pileups reach the matrix stage.
 - **Progress-aware logging:** Chunk processors emit periodic `%` complete + ETA updates plus detailed per-chunk statistics so multi-hour conversions remain easy to follow from the console.
 
