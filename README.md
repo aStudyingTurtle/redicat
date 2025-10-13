@@ -12,12 +12,11 @@ If REDICAT supports your research, please cite:
 ## Highlights
 - **Canonical-contig smart defaults:** By default every command operates on the primary human chromosomes (chr1–chr22, chrX, chrY, chrM). Add `--allcontigs` to opt into decoys, patches, or spike-ins when you need full genome coverage.
 - **On-the-fly site vetting:** Depth, N-content, and editing-support thresholds mirror the `bulk` heuristics so only confident loci advance to matrix assembly.
-- **Fearless concurrency:** Rayon thread pools, crossbeam channels, and reader pooling keep pileup traversal and sparse matrix assembly fully saturated on modern CPUs.
+- **Fearless concurrency:** Rayon thread pools, per-thread chunk reducers, and reader pooling keep pileup traversal and sparse matrix assembly saturated on modern CPUs.
 - **Dynamic Rayon work queue:** `ParGranges` now flattens genomic tiles into a global work queue so `bulk` keeps every core busy even when only a handful of contigs remain in flight.
-- **Streaming AnnData assembly:** `bam2mtx` pushes chunk results through a bounded channel into a streaming sparse converter, so `.h5ad` generation no longer requires buffering millions of `PositionData` structs in RAM.
-- **Backpressure-aware streaming:** The bam2mtx worker queue now enforces a ≥512 slot buffer and uses adaptive backoff when the AnnData writer lags, eliminating producer-side blocking and keeping Rayon threads busy without risking deadlocks.
+- **Parallel AnnData assembly:** `bam2mtx` now collects per-thread chunk results, merges them with a parallel sparse assembler, and writes `.h5ad` outputs without a single threaded bottleneck or extra global channels.
 - **Run-aware sparse merging (New):** The AnnData converter now persists sorted triplet runs to disk and performs a streaming multi-way merge when finalising CSR layers, keeping peak RSS close to the sparse output size and preventing the single-threaded 30+ minute stall that previously occurred after "Processed 100%" log events.
-- **Depth-aware chunking:** `bam2mtx` streams TSV manifests with Polars, accumulates position weights (`DEPTH + INS + DEL + REF_SKIP + FAIL`) until the `--chunksize` budget is spent, and automatically falls back to the narrow `--chunk-size-max-depth` batches whenever `NEAR_MAX_DEPTH=true`.
+- **Depth-aware chunking:** `bam2mtx` streams TSV manifests with Polars, accumulates position weights (`DEPTH + INS + DEL + REF_SKIP + FAIL`) until the `--chunksize` budget is spent, and automatically falls back to the hotspot-friendly `--chunk-size-max-depth` batches (default 15) whenever `NEAR_MAX_DEPTH=true`.
 - **Local-time observability:** Console logs now emit system time zone timestamps and 30-minute status beacons that report remaining chunks alongside outstanding `NEAR_MAX_DEPTH` loci for long-running jobs.
 - **Depth-cap skip audit:** Any site whose pileup depth meets or exceeds `--max-depth` is skipped before UMI aggregation, recorded to a sibling `<name>_skiped_sites.txt` manifest, and summarised in the final log output for easy triage.
 - **Layered architecture:** The library is split into `core` (shared utilities & sparse ops), `engine` (parallel schedulers and position primitives), and `pipeline` (bam2mtx & call workflows), keeping reusable pieces lightweight and testable.
@@ -103,8 +102,7 @@ Option reference:
 | `-A`  | `--allcontigs`        | Traverse every contig instead of canonical set.       | `false`         |
 
 ### `bam2mtx`
-Converts barcoded BAMs into sparse AnnData matrices (per base, per barcode, strand-aware). Accepts precomputed site lists or can bootstrap one via `--two-pass`, which internally runs `bulk` with the same contour filters. Parallel chunk workers now stream their results through a bounded crossbeam channel into the AnnData writer, eliminating the previous end-of-run aggregation penalty and keeping memory bounded by the active chunk.
-The channel enforces at least 512 buffered chunks and each producer uses adaptive backoff when the writer lags, so Rayon workers never deadlock behind a saturated queue.
+Converts barcoded BAMs into sparse AnnData matrices (per base, per barcode, strand-aware). Accepts precomputed site lists or can bootstrap one via `--two-pass`, which internally runs `bulk` with the same contour filters. Parallel chunk workers now reduce their results locally and a multi-threaded sparse assembler materialises the final CSR layers before the `.h5ad` file is written, avoiding the previous channel-based bottleneck and keeping memory predictable.
 
 During long conversions the console prints system-local timestamps and, every ~30 minutes, a status snapshot summarising remaining chunks and unprocessed `NEAR_MAX_DEPTH` loci so operators can watch backlog decay in real time. At completion the command emits a `<output>_skiped_sites.txt` sibling file listing the contig, 1-based position, and observed depth of every locus that was skipped because its pileup depth met or exceeded `--max-depth`.
 
@@ -142,8 +140,8 @@ Option reference:
 | —     | `--umi-tag`           | BAM tag containing UMI sequence.                               | `UB`     |
 | —     | `--cb-tag`            | BAM tag containing cell barcode.                               | `CB`     |
 | `-r`  | `--reference`         | Reference FASTA (required for CRAM).                           | optional |
-| `-c`  | `--chunksize`         | Genomic position weight budget per processing chunk (applied to standard loci). | `60000` |
-| —     | `--chunk-size-max-depth` | Maximum hotspot chunk length when `NEAR_MAX_DEPTH` is `true` in the TSV. **Updated default to 1 for better memory control.** | `2`     |
+| `-c`  | `--chunksize`         | Genomic position weight budget per processing chunk (applied to standard loci). | `1000000` |
+| —     | `--chunk-size-max-depth` | Maximum hotspot chunk length when `NEAR_MAX_DEPTH` is `true` in the TSV. **Updated default to 15 for balanced hotspot throughput.** | `15`     |
 | —     | `--matrix-density`    | Hint for CSR buffer sizing.                                    | `0.005`  |
 | `-A`  | `--allcontigs`        | Include decoys and noncanonical contigs.                       | `false`  |
 
@@ -158,14 +156,14 @@ Important options:
 ## Performance Notes
 - **UMI String Interning (New):** Identical UMI sequences are deduplicated in memory using `Arc<str>`, reducing memory footprint by 50-70% for datasets with repetitive UMIs at high-depth positions.
 - **Adaptive HashMap Capacity (New):** Hash maps dynamically adjust their initial capacity based on chunk characteristics (high-depth vs normal), preventing over-allocation while maintaining performance.
-- **Channel backpressure (New):** `bam2mtx`'s crossbeam queue now guarantees at least 512 buffered chunks and relies on adaptive backoff polling, keeping producers responsive while avoiding send-side blocking.
+- **Parallel sparse reduction (New):** `bam2mtx` merges per-thread chunk outputs with a lock-free sparse assembler, so CSR materialisation scales with core count without staging everything in a single consumer thread.
 - **Aggressive Triplet Spilling (New):** The streaming matrix builder now uses a lower spill threshold (100K triplets, minimum 50K cap) to flush data to disk more frequently, dramatically reducing peak memory usage during large conversions.
 - **Depth-cap awareness (New):** `bulk` now marks any site whose filtered depth reaches the configured maximum as `NEAR_MAX_DEPTH`, complementing the existing 1% proximity heuristic and making depth clipping visible downstream.
 - **Streaming CSR materialisation (New):** Triplet runs are merged with a heap-based iterator that deduplicates row/column pairs on the fly, so final layer construction stays parallel-friendly and never loads all triplets into RAM at once.
 - **Enhanced Chunk Monitoring (New):** Each chunk logs position count, high-depth site count, and total weight, providing visibility into workload characteristics and helping diagnose memory-intensive regions.
 - **Reader pooling:** Each worker thread checks out an `IndexedReader` from a pool, avoiding reopen/seek penalties when iterating across genomic tiles.
-- **Triplet batching:** Sparse matrices are assembled from thread-local batches of `(row, col, value)` triplets, eliminating cross-thread contention, and the streaming writer drains them via bounded channels to keep peak memory low.
-- **Adaptive chunking:** Dual CLI knobs (`--chunksize` for the depth-weighted standard loci budget and `--chunk-size-max-depth` for hotspot batch caps, now defaulting to 1) govern the parallel granularity for `bam2mtx` (and the batch size for AnnData writes), while the refactored `ParGranges` scheduler flattens tiles into a single Rayon queue so `bulk` honors `--chunksize` without serial bottlenecks.
+- **Triplet batching:** Sparse matrices are assembled from thread-local batches of `(row, col, value)` triplets, eliminating cross-thread contention, and the final merge operates fully in parallel without an intermediate channel stage.
+- **Adaptive chunking:** Dual CLI knobs (`--chunksize` for the depth-weighted standard loci budget and `--chunk-size-max-depth` for hotspot batch caps, now defaulting to 15) govern the parallel granularity for `bam2mtx` (and the batch size for AnnData writes), while the refactored `ParGranges` scheduler flattens tiles into a single Rayon queue so `bulk` honors `--chunksize` without serial bottlenecks.
 - **Chunk-level fetch & depth guards:** `bam2mtx` batches contiguous sites per contig, records observed depth, and—in `--two-pass` mode—relies on a first-pass `bulk` run capped at `--max-depth 8000` plus in-run pileup guards to prune oversaturated loci before dense pileups reach the matrix stage.
 - **Progress-aware logging:** Chunk processors emit periodic `%` complete + ETA updates plus detailed per-chunk statistics so multi-hour conversions remain easy to follow from the console.
 

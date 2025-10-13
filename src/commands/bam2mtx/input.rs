@@ -45,16 +45,6 @@ impl PositionChunk {
         self.near_max_depth_count
     }
 
-    /// Calculate total weight (positions × depth) for capacity estimation.
-    /// This helps estimate memory footprint for adaptive channel sizing.
-    #[inline]
-    pub fn total_weight(&self) -> u64 {
-        self.positions
-            .iter()
-            .map(|p| p.depth as u64)
-            .sum::<u64>()
-            .saturating_mul(self.positions.len() as u64)
-    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -99,7 +89,14 @@ pub fn read_positions<P: AsRef<Path>>(tsv_path: P) -> Result<Vec<GenomicPosition
         start = end.saturating_add(1);
     }
 
-    let dataframe = CsvReader::new(Cursor::new(processed))
+    let thread_budget = num_cpus::get().clamp(1, 64);
+    let options = CsvReadOptions::default()
+        .with_has_header(true)
+        .with_n_threads(Some(thread_budget))
+        .with_rechunk(true);
+
+    let dataframe = options
+        .into_reader_with_file_handle(Cursor::new(processed))
         .finish()
         .with_context(|| format!("Failed to parse positions from {:?}", path))?;
 

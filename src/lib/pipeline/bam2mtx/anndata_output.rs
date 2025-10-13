@@ -14,7 +14,7 @@ use anyhow::{anyhow, Context, Result};
 use log::info;
 use nalgebra_sparse::csr::CsrMatrix;
 use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -113,6 +113,36 @@ impl AnnDataConverter {
     /// Backwards-compatible adapter for call sites that already collected data in memory.
     pub fn convert(&self, data: &[PositionData], output_path: &Path) -> Result<AnnData<H5>> {
         self.convert_streaming(data.to_vec().into_iter(), output_path)
+    }
+
+    /// Aggregate chunk-local results that were captured per worker thread and assemble the
+    /// final sparse matrices in parallel before writing the `.h5ad` file.
+    pub fn convert_parallel_chunks(
+        &self,
+        mut chunks: Vec<Vec<PositionData>>,
+        output_path: &Path,
+    ) -> Result<AnnData<H5>> {
+        let total_positions: usize = chunks.iter().map(|c| c.len()).sum();
+        let mut flattened = Vec::with_capacity(total_positions);
+        for mut chunk in chunks.drain(..) {
+            flattened.append(&mut chunk);
+        }
+        self.convert_parallel(&flattened, output_path)
+    }
+
+    /// Convert an in-memory collection of [`PositionData`] using the parallel sparse assembler.
+    pub fn convert_parallel(
+        &self,
+        data: &[PositionData],
+        output_path: &Path,
+    ) -> Result<AnnData<H5>> {
+        let parts = assemble_parallel_parts(
+            &self.config,
+            &self.barcode_processor,
+            &self.contig_names,
+            data,
+        )?;
+        self.write_parts(parts, output_path)
     }
 
     fn write_parts(&self, parts: StreamingAnnDataParts, output_path: &Path) -> Result<AnnData<H5>> {
@@ -474,7 +504,7 @@ fn read_exact_shared(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
 struct PositionKey {
     contig_id: u32,
     pos: u64,
@@ -855,6 +885,348 @@ fn stream_to_csr(
         .map_err(|err| anyhow!(err.to_string()))
 }
 
+fn assemble_parallel_parts(
+    config: &AnnDataConfig,
+    barcode_processor: &Arc<BarcodeProcessor>,
+    contig_names: &Arc<Vec<String>>,
+    data: &[PositionData],
+) -> Result<StreamingAnnDataParts> {
+    if data.is_empty() {
+        let mut forward_layers = Vec::with_capacity(4);
+        for _ in 0..4 {
+            forward_layers.push(CsrMatrix::zeros(0, 0));
+        }
+        let reverse_layers = if config.stranded {
+            let mut layers = Vec::with_capacity(4);
+            for _ in 0..4 {
+                layers.push(CsrMatrix::zeros(0, 0));
+            }
+            layers
+        } else {
+            Vec::new()
+        };
+
+        return Ok(StreamingAnnDataParts {
+            cell_names: Vec::new(),
+            position_names: Vec::new(),
+            forward_layers,
+            reverse_layers,
+        });
+    }
+
+    let observed_cells: FxHashSet<u32> = data
+        .par_iter()
+        .fold(
+            || FxHashSet::default(),
+            |mut acc, record| {
+                acc.extend(record.counts.keys().copied());
+                acc
+            },
+        )
+        .reduce(|| FxHashSet::default(), |mut left, right| {
+            left.extend(right.into_iter());
+            left
+        });
+
+    let mut observed: Vec<u32> = observed_cells.into_iter().collect();
+    observed.sort_unstable();
+
+    let n_cells_total = barcode_processor.len();
+    let mut cell_remap = vec![None; n_cells_total];
+    for (row_idx, cell_id) in observed.iter().enumerate() {
+        if let Some(slot) = cell_remap.get_mut(*cell_id as usize) {
+            *slot = Some(row_idx as u32);
+        }
+    }
+
+    let cell_names = observed
+        .iter()
+        .map(|&id| {
+            barcode_processor
+                .barcode_by_id(id)
+                .unwrap_or("unknown")
+                .to_string()
+        })
+        .collect();
+
+    let mut position_keys: Vec<PositionKey> = data
+        .iter()
+        .map(|p| PositionKey {
+            contig_id: p.contig_id,
+            pos: p.pos,
+        })
+        .collect();
+
+    position_keys.par_sort_unstable_by(|a, b| match a.contig_id.cmp(&b.contig_id) {
+        Ordering::Equal => a.pos.cmp(&b.pos),
+        ord => ord,
+    });
+    position_keys.dedup();
+
+    let position_names = position_keys
+        .iter()
+        .map(|key| {
+            let contig = contig_names
+                .get(key.contig_id as usize)
+                .map(|s| s.as_str())
+                .unwrap_or("unknown");
+            format!("{}:{}", contig, key.pos)
+        })
+        .collect();
+
+    let mut position_lookup = FxHashMap::with_capacity_and_hasher(position_keys.len(), Default::default());
+    for (idx, key) in position_keys.iter().enumerate() {
+        position_lookup.insert(*key, idx as u32);
+    }
+
+    let n_rows = observed.len();
+    let n_cols = position_keys.len();
+    let capacity_hint = config.chunk_size.max(MIN_STREAM_BUFFER_CAPACITY);
+
+    let accumulator = data
+        .par_iter()
+        .try_fold(
+            || ParallelLayerAccumulator::new(config.stranded, capacity_hint),
+            |mut acc, position| -> Result<ParallelLayerAccumulator> {
+                let key = PositionKey {
+                    contig_id: position.contig_id,
+                    pos: position.pos,
+                };
+                let column = *position_lookup
+                    .get(&key)
+                    .ok_or_else(|| anyhow!("position {:?} missing from lookup", key))?;
+                acc.ingest(position, column, &cell_remap, config.stranded);
+                Ok(acc)
+            },
+        )
+        .try_reduce(
+            || ParallelLayerAccumulator::new(config.stranded, capacity_hint),
+            |mut left, right| -> Result<ParallelLayerAccumulator> {
+                left.merge(right);
+                Ok(left)
+            },
+        )?;
+
+    let (forward_layers, reverse_layers) =
+        accumulator.finish(n_rows, n_cols, config.stranded)?;
+
+    Ok(StreamingAnnDataParts {
+        cell_names,
+        position_names,
+        forward_layers,
+        reverse_layers,
+    })
+}
+
+struct ParallelLayerAccumulator {
+    forward: [Vec<Triplet>; 4],
+    reverse: Option<[Vec<Triplet>; 4]>,
+}
+
+impl ParallelLayerAccumulator {
+    fn new(stranded: bool, capacity_hint: usize) -> Self {
+        let forward = [
+            Vec::with_capacity(capacity_hint),
+            Vec::with_capacity(capacity_hint),
+            Vec::with_capacity(capacity_hint),
+            Vec::with_capacity(capacity_hint),
+        ];
+        let reverse = if stranded {
+            Some([
+                Vec::with_capacity(capacity_hint),
+                Vec::with_capacity(capacity_hint),
+                Vec::with_capacity(capacity_hint),
+                Vec::with_capacity(capacity_hint),
+            ])
+        } else {
+            None
+        };
+
+        Self { forward, reverse }
+    }
+
+    fn ingest(
+        &mut self,
+        position: &PositionData,
+        column: u32,
+        cell_remap: &[Option<u32>],
+        stranded: bool,
+    ) {
+        for (&cell_id, counts) in position.counts.iter() {
+            let Some(row_opt) = cell_remap.get(cell_id as usize) else {
+                continue;
+            };
+            let Some(row) = row_opt else {
+                continue;
+            };
+
+            if stranded {
+                self.push_stranded(*row, column, counts);
+            } else {
+                self.push_unstranded(*row, column, counts);
+            }
+        }
+    }
+
+    fn push_stranded(&mut self, row: u32, column: u32, counts: &StrandBaseCounts) {
+        push_counts(&mut self.forward, row, column, &counts.forward);
+        if let Some(reverse) = self.reverse.as_mut() {
+            push_counts(reverse, row, column, &counts.reverse);
+        }
+    }
+
+    fn push_unstranded(&mut self, row: u32, column: u32, counts: &StrandBaseCounts) {
+        let merged = BaseCounts {
+            a: counts.forward.a + counts.reverse.a,
+            t: counts.forward.t + counts.reverse.t,
+            g: counts.forward.g + counts.reverse.g,
+            c: counts.forward.c + counts.reverse.c,
+        };
+        push_counts(&mut self.forward, row, column, &merged);
+    }
+
+    fn merge(&mut self, other: ParallelLayerAccumulator) {
+        let [o_a, o_t, o_g, o_c] = other.forward;
+        self.forward[0].extend(o_a);
+        self.forward[1].extend(o_t);
+        self.forward[2].extend(o_g);
+        self.forward[3].extend(o_c);
+
+        if let (Some(dst), Some([r_a, r_t, r_g, r_c])) = (self.reverse.as_mut(), other.reverse) {
+            dst[0].extend(r_a);
+            dst[1].extend(r_t);
+            dst[2].extend(r_g);
+            dst[3].extend(r_c);
+        }
+    }
+
+    fn finish(
+        self,
+        n_rows: usize,
+        n_cols: usize,
+        stranded: bool,
+    ) -> Result<(Vec<CsrMatrix<f32>>, Vec<CsrMatrix<f32>>)> {
+        let [f_a, f_t, f_g, f_c] = self.forward;
+        let forward_layers = vec![
+            triplets_to_csr(f_a, n_rows, n_cols)?,
+            triplets_to_csr(f_t, n_rows, n_cols)?,
+            triplets_to_csr(f_g, n_rows, n_cols)?,
+            triplets_to_csr(f_c, n_rows, n_cols)?,
+        ];
+
+        let reverse_layers = if stranded {
+            if let Some([r_a, r_t, r_g, r_c]) = self.reverse {
+                vec![
+                    triplets_to_csr(r_a, n_rows, n_cols)?,
+                    triplets_to_csr(r_t, n_rows, n_cols)?,
+                    triplets_to_csr(r_g, n_rows, n_cols)?,
+                    triplets_to_csr(r_c, n_rows, n_cols)?,
+                ]
+            } else {
+                vec![
+                    CsrMatrix::zeros(n_rows, n_cols),
+                    CsrMatrix::zeros(n_rows, n_cols),
+                    CsrMatrix::zeros(n_rows, n_cols),
+                    CsrMatrix::zeros(n_rows, n_cols),
+                ]
+            }
+        } else {
+            Vec::new()
+        };
+
+        Ok((forward_layers, reverse_layers))
+    }
+}
+
+fn push_counts(buffers: &mut [Vec<Triplet>; 4], row: u32, column: u32, counts: &BaseCounts) {
+    if counts.a > 0 {
+        buffers[0].push(Triplet {
+            row,
+            col: column,
+            value: counts.a,
+        });
+    }
+    if counts.t > 0 {
+        buffers[1].push(Triplet {
+            row,
+            col: column,
+            value: counts.t,
+        });
+    }
+    if counts.g > 0 {
+        buffers[2].push(Triplet {
+            row,
+            col: column,
+            value: counts.g,
+        });
+    }
+    if counts.c > 0 {
+        buffers[3].push(Triplet {
+            row,
+            col: column,
+            value: counts.c,
+        });
+    }
+}
+
+fn triplets_to_csr(
+    mut triplets: Vec<Triplet>,
+    n_rows: usize,
+    n_cols: usize,
+) -> Result<CsrMatrix<f32>> {
+    if n_rows == 0 || n_cols == 0 {
+        return Ok(CsrMatrix::zeros(n_rows, n_cols));
+    }
+
+    if triplets.is_empty() {
+        return Ok(CsrMatrix::zeros(n_rows, n_cols));
+    }
+
+    if triplets.len() > 1 {
+        triplets.par_sort_unstable();
+    }
+
+    let mut merged: Vec<Triplet> = Vec::with_capacity(triplets.len());
+    let mut iter = triplets.into_iter();
+    if let Some(mut current) = iter.next() {
+        for entry in iter {
+            if current.row == entry.row && current.col == entry.col {
+                current.value = current.value.saturating_add(entry.value);
+            } else {
+                merged.push(current);
+                current = entry;
+            }
+        }
+        merged.push(current);
+    }
+
+    let mut column_indices: Vec<usize> = Vec::with_capacity(merged.len());
+    let mut values: Vec<f32> = Vec::with_capacity(merged.len());
+    let mut row_counts = vec![0usize; n_rows];
+
+    for triplet in merged.into_iter() {
+        let row = triplet.row as usize;
+        let col = triplet.col as usize;
+        if row >= n_rows || col >= n_cols {
+            continue;
+        }
+        row_counts[row] = row_counts[row].saturating_add(1);
+        column_indices.push(col);
+        values.push(triplet.value as f32);
+    }
+
+    let mut row_offsets = Vec::with_capacity(n_rows + 1);
+    row_offsets.push(0);
+    let mut nnz = 0usize;
+    for count in row_counts.into_iter() {
+        nnz = nnz.saturating_add(count);
+        row_offsets.push(nnz);
+    }
+
+    CsrMatrix::try_from_csr_data(n_rows, n_cols, row_offsets, column_indices, values)
+        .map_err(|err| anyhow!(err.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -990,6 +1362,87 @@ mod tests {
 
         let reverse_c = matrix_entries(&reverse_layers[3]);
         assert_eq!(reverse_c, vec![(1, 0, 2.0)]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn parallel_assembler_matches_streaming_builder() -> Result<()> {
+        let mut config = AnnDataConfig::default();
+        config.stranded = true;
+        config.threads = 2;
+        config.chunk_size = 4;
+        config.batch_size = 4;
+        config.triplet_spill_nnz = 8;
+
+        let barcode_processor = Arc::new(BarcodeProcessor::from_vec(vec![
+            "AAAC".to_string(),
+            "GGGG".to_string(),
+        ]));
+        let contig_names = Arc::new(vec!["chr1".to_string()]);
+
+        let data = vec![
+            position(
+                0,
+                1,
+                vec![
+                    (0, make_counts((2, 0, 1, 0), (0, 0, 0, 0))),
+                    (1, make_counts((0, 1, 0, 0), (0, 0, 0, 2))),
+                ],
+            ),
+            position(
+                0,
+                2,
+                vec![
+                    (0, make_counts((0, 0, 0, 0), (1, 0, 0, 0))),
+                    (1, make_counts((3, 0, 0, 0), (0, 0, 0, 0))),
+                ],
+            ),
+        ];
+
+        let mut builder = StreamingMatrixBuilder::new(
+            config.clone(),
+            Arc::clone(&barcode_processor),
+            Arc::clone(&contig_names),
+        )?;
+        for entry in data.clone() {
+            builder.ingest(entry)?;
+        }
+        let streaming_parts = builder.finalize()?;
+
+        let parallel_parts = assemble_parallel_parts(
+            &config,
+            &barcode_processor,
+            &contig_names,
+            &data,
+        )?;
+
+        assert_eq!(streaming_parts.cell_names, parallel_parts.cell_names);
+        assert_eq!(streaming_parts.position_names, parallel_parts.position_names);
+
+        let streaming_forward: Vec<Vec<(usize, usize, f32)>> = streaming_parts
+            .forward_layers
+            .iter()
+            .map(matrix_entries)
+            .collect();
+        let parallel_forward: Vec<Vec<(usize, usize, f32)>> = parallel_parts
+            .forward_layers
+            .iter()
+            .map(matrix_entries)
+            .collect();
+        assert_eq!(streaming_forward, parallel_forward);
+
+        let streaming_reverse: Vec<Vec<(usize, usize, f32)>> = streaming_parts
+            .reverse_layers
+            .iter()
+            .map(matrix_entries)
+            .collect();
+        let parallel_reverse: Vec<Vec<(usize, usize, f32)>> = parallel_parts
+            .reverse_layers
+            .iter()
+            .map(matrix_entries)
+            .collect();
+        assert_eq!(streaming_reverse, parallel_reverse);
 
         Ok(())
     }

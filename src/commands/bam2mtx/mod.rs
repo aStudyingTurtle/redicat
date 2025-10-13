@@ -4,136 +4,28 @@ mod input;
 mod workflow;
 
 use anyhow::{anyhow, Result};
-use crossbeam::channel::{bounded, TrySendError};
 use log::info;
-use parking_lot::Mutex;
 use rayon::prelude::*;
 use redicat_lib::bam2mtx::anndata_output::{AnnDataConfig, AnnDataConverter};
 use redicat_lib::bam2mtx::barcode::BarcodeProcessor;
-use redicat_lib::bam2mtx::processor::BamProcessorConfig;
+use redicat_lib::bam2mtx::processor::{BamProcessorConfig, PositionData};
 use redicat_lib::utils;
 use std::fs::File;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::commands::{common, is_standard_contig};
 
 pub use args::Bam2MtxArgs;
 use engine::{OptimizedChunkProcessor, SkippedSite};
-use input::{chunk_positions, filter_positions_by, read_positions, PositionChunk};
+use input::{chunk_positions, filter_positions_by, read_positions};
 use workflow::prepare_positions_file;
 
-/// Hard lower bound for the producer-consumer channel used by bam2mtx.
-const MIN_CHANNEL_CAPACITY: usize = 512;
-/// Number of spin-yield attempts before sleeping during backpressure handling.
-const SEND_BACKPRESSURE_YIELD_SPINS: usize = 12;
-/// Maximum sleep duration (ms) used while backing off on a full channel.
-const SEND_BACKPRESSURE_SLEEP_MAX_MS: u64 = 64;
-/// Initial sleep duration (ms) once we move past spin yielding.
-const SEND_BACKPRESSURE_SLEEP_BASE_MS: u64 = 1;
-
-/// Calculate adaptive channel capacity based on workload characteristics.
-///
-/// This function estimates optimal channel capacity considering:
-/// - Thread count (parallelism level)
-/// - Chunk sizes and weights (memory footprint)
-/// - Available system memory
-/// - Total number of chunks (queue depth)
-///
-/// Returns a capacity that balances throughput and memory usage.
-fn estimate_channel_capacity(
-    threads: usize,
-    chunks: &[PositionChunk],
-    available_memory_gb: u64,
-) -> usize {
-    if chunks.is_empty() {
-        return threads * 2; // Fallback to simple heuristic
-    }
-
-    // Calculate average chunk weight (positions × depth)
-    let total_weight: u64 = chunks.iter().map(|c| c.total_weight()).sum();
-    let avg_weight = total_weight / chunks.len() as u64;
-
-    // Estimate memory per buffered chunk (rough approximation)
-    // Each position typically uses ~100-500 bytes depending on depth
-    let bytes_per_weight_unit = 200_u64; // Conservative estimate
-    let avg_chunk_memory_mb = (avg_weight * bytes_per_weight_unit) / (1024 * 1024);
-
-    // Improved adaptive calculation
-    let min_capacity = MIN_CHANNEL_CAPACITY;
-    let max_capacity = 4096;
-
-    // Base capacity: threads * 4 (better for high parallelism)
-    let base_capacity = threads.saturating_mul(4);
-
-    // Maximum by memory: use up to 20% of available memory for buffering
-    let max_by_memory = if avg_chunk_memory_mb > 0 {
-        ((available_memory_gb * 1024 * 20) / 100 / avg_chunk_memory_mb) as usize
-    } else {
-        base_capacity * 4
-    };
-
-    // Maximum by chunk count: don't buffer more than 33% of total chunks
-    let max_by_chunks = (chunks.len() as f64 * 0.33).ceil() as usize;
-
-    // Choose the minimum of all constraints, but at least min_capacity
-    let capacity = base_capacity
-        .max(min_capacity)
-        .min(max_by_memory)
-        .min(max_by_chunks)
-        .min(max_capacity);
-
-    capacity.max(MIN_CHANNEL_CAPACITY)
-}
-
-fn send_with_backpressure<T: Send + 'static>(
-    sender: &crossbeam::channel::Sender<T>,
-    value: T,
-    chunk_idx: usize,
-) -> Result<()> {
-    let mut attempts = 0usize;
-    let mut payload = Some(value);
-
-    loop {
-        let msg = payload.take().expect("pending payload must be present");
-        match sender.try_send(msg) {
-            Ok(()) => return Ok(()),
-            Err(TrySendError::Full(msg)) => {
-                payload = Some(msg);
-                attempts = attempts.saturating_add(1);
-                if attempts <= SEND_BACKPRESSURE_YIELD_SPINS {
-                    thread::yield_now();
-                    continue;
-                }
-
-                if attempts == SEND_BACKPRESSURE_YIELD_SPINS + 1 {
-                    log::debug!(
-                        "bam2mtx chunk {} waiting for AnnData writer (channel saturated)",
-                        chunk_idx
-                    );
-                }
-
-                let backoff_shift = attempts
-                    .saturating_sub(SEND_BACKPRESSURE_YIELD_SPINS + 1)
-                    .min(6);
-                let sleep_ms = SEND_BACKPRESSURE_SLEEP_BASE_MS
-                    .saturating_mul(1u64 << backoff_shift)
-                    .min(SEND_BACKPRESSURE_SLEEP_MAX_MS)
-                    .max(SEND_BACKPRESSURE_SLEEP_BASE_MS);
-
-                thread::sleep(Duration::from_millis(sleep_ms));
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(anyhow!(
-                    "failed to send chunk {}: AnnData writer disconnected",
-                    chunk_idx
-                ));
-            }
-        }
-    }
+struct ChunkOutcome {
+    positions: Vec<PositionData>,
+    skipped: Vec<SkippedSite>,
 }
 
 /// Entry point for the `bam2mtx` command.
@@ -226,7 +118,7 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     )?;
     let contig_names = processor.contig_names();
 
-    info!("Processing chunks in parallel with streaming AnnData conversion...");
+    info!("Processing chunks with parallel aggregation...");
     let processing_start = Instant::now();
     let total_chunks = chunks.len();
     let processed_chunks = AtomicUsize::new(0);
@@ -236,98 +128,17 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     let long_report_interval = Duration::from_secs(1800);
     let last_long_report = AtomicU64::new(0);
 
-    // Adaptive channel capacity based on workload characteristics
-    let available_memory_gb = {
-        // Try to get system memory, fallback to conservative estimate
-        #[cfg(target_os = "linux")]
-        {
-            std::fs::read_to_string("/proc/meminfo")
-                .ok()
-                .and_then(|content| {
-                    content
-                        .lines()
-                        .find(|line| line.starts_with("MemAvailable:"))
-                        .and_then(|line| {
-                            line.split_whitespace()
-                                .nth(1)
-                                .and_then(|s| s.parse::<u64>().ok())
-                                .map(|kb| kb / (1024 * 1024)) // KB to GB
-                        })
-                })
-                .unwrap_or(8) // Default to 8GB if detection fails
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            8 // Conservative default for non-Linux systems
-        }
-    };
-
-    let channel_capacity = estimate_channel_capacity(active_threads, &chunks, available_memory_gb);
-
-    info!(
-        "Creating adaptive bounded channel: capacity={} (threads={}, chunks={}, memory={}GB)",
-        channel_capacity,
-        active_threads,
-        chunks.len(),
-        available_memory_gb
-    );
-    let (sender, receiver) = bounded(channel_capacity);
-    let output_path = args.output.clone();
-    let converter =
-        AnnDataConverter::new(adata_config, Arc::clone(&barcode_processor), contig_names);
-    let output_path_writer = output_path.clone();
-    let skipped_sites: Arc<Mutex<Vec<SkippedSite>>> = Arc::new(Mutex::new(Vec::new()));
-
-    let writer_handle = thread::spawn(move || -> Result<()> {
-        info!(
-            "Streaming AnnData writer listening with buffer capacity {} entries",
-            channel_capacity
-        );
-        let adata = converter.convert_streaming(
-            receiver
-                .into_iter()
-                .flat_map(|chunk: Vec<_>| chunk.into_iter()),
-            &output_path_writer,
-        )?;
-        converter.write_to_file(&adata, &output_path_writer)?;
-        info!(
-            "AnnData streaming write finished -> {:?}",
-            output_path_writer
-        );
-        Ok(())
-    });
-
-    // CRITICAL FIX: Properly manage sender lifetime to prevent channel deadlock
-    //
-    // The Problem:
-    // - try_for_each_init gives each Rayon worker thread its own sender clone
-    // - These per-thread clones persist in the thread pool even after parallel iteration completes
-    // - The writer thread waits for ALL senders to be dropped before closing the channel
-    // - If sender clones remain alive in Rayon's thread pool, the writer never sees EOF
-    // - This causes deadlock: producers done but writer waiting, or channel disconnect errors
-    //
-    // The Solution:
-    // - Create an intermediate sender_clone in an explicit scope
-    // - Pass this clone to try_for_each_init instead of the original sender
-    // - When scope ends, sender_clone drops, ensuring all thread-local clones also drop
-    // - Then drop the original sender to signal EOF to the writer
-    {
-        let sender_clone = sender.clone();
-        let skipped_sites_clone = Arc::clone(&skipped_sites);
-
-        chunks.into_par_iter().enumerate().try_for_each_init(
-            || (sender_clone.clone(), Arc::clone(&skipped_sites_clone)),
-            |(tx, skipped_bucket), (idx, chunk)| -> Result<()> {
+    let chunk_results = chunks
+        .into_par_iter()
+        .enumerate()
+        .try_fold(
+            || Vec::new(),
+            |mut local, (_idx, chunk)| -> Result<Vec<ChunkOutcome>> {
                 let chunk_near = chunk.near_max_depth_count();
                 let (data, skipped) = processor.process_chunk(&chunk)?;
-                if !skipped.is_empty() {
-                    let mut guard = skipped_bucket.lock();
-                    guard.extend(skipped);
-                }
-                let chunk_positions = data.len();
-                if chunk_positions > 0 {
-                    send_with_backpressure(&tx, data, idx)?;
-                    total_positions.fetch_add(chunk_positions, Ordering::Relaxed);
+
+                if !data.is_empty() {
+                    total_positions.fetch_add(data.len(), Ordering::Relaxed);
                 }
 
                 let near_remaining = if chunk_near == 0 {
@@ -379,33 +190,46 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
                     }
                 }
 
-                Ok(())
+                local.push(ChunkOutcome { positions: data, skipped });
+                Ok(local)
+            },
+        )
+        .try_reduce(
+            || Vec::new(),
+            |mut acc, mut local| {
+                acc.append(&mut local);
+                Ok(acc)
             },
         )?;
 
-        // sender_clone drops here, cleaning up all per-thread clones from Rayon pool
+    info!(
+        "Chunk traversal finished in {:?} ({} positions)",
+        processing_start.elapsed(),
+        total_positions.load(Ordering::Relaxed)
+    );
+
+    let mut skipped_records: Vec<SkippedSite> = Vec::new();
+    let mut position_batches: Vec<Vec<PositionData>> = Vec::with_capacity(chunk_results.len());
+    for outcome in chunk_results {
+        let ChunkOutcome { positions, skipped } = outcome;
+        if !skipped.is_empty() {
+            skipped_records.extend(skipped);
+        }
+        if !positions.is_empty() {
+            position_batches.push(positions);
+        }
     }
 
-    // Now drop the original sender to signal EOF to writer thread
-    drop(sender);
-    info!("All chunk senders dropped, waiting for writer thread to complete...");
+    let output_path = args.output.clone();
+    let converter = AnnDataConverter::new(adata_config, Arc::clone(&barcode_processor), contig_names);
+    info!(
+        "Assembling sparse matrices from {} result batches...",
+        position_batches.len()
+    );
+    let adata = converter.convert_parallel_chunks(position_batches, &output_path)?;
+    converter.write_to_file(&adata, &output_path)?;
+    info!("AnnData write finished -> {:?}", output_path);
 
-    let writer_result = writer_handle.join().map_err(|err| {
-        let panic_msg = if let Some(msg) = err.downcast_ref::<&str>() {
-            *msg
-        } else if let Some(msg) = err.downcast_ref::<String>() {
-            msg.as_str()
-        } else {
-            "unknown panic"
-        };
-        anyhow!("AnnData writer thread panicked: {panic_msg}")
-    })?;
-    writer_result?;
-
-    let skipped_records = {
-        let mut guard = skipped_sites.lock();
-        std::mem::take(&mut *guard)
-    };
     let skipped_count = skipped_records.len();
     let mut skipped_path = output_path.clone();
     let stem = skipped_path
@@ -432,27 +256,4 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     info!("bam2mtx workflow finished in {:?}", start_time.elapsed());
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn send_with_backpressure_succeeds_when_capacity_frees() {
-        let (tx, rx) = bounded::<Vec<i32>>(1);
-        tx.send(vec![1]).unwrap();
-
-        let handle = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(5));
-            rx.recv().unwrap();
-            // Simulate the writer freeing a slot, then consuming the next payload
-            thread::sleep(Duration::from_millis(5));
-            rx.recv().unwrap();
-        });
-
-        send_with_backpressure(&tx, vec![2], 42).expect("backpressure send should succeed");
-        drop(tx);
-        handle.join().unwrap();
-    }
 }
