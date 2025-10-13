@@ -21,6 +21,7 @@ If REDICAT supports your research, please cite:
 - **Depth-cap skip audit:** Any site whose pileup depth meets or exceeds `--max-depth` is skipped before UMI aggregation, recorded to a sibling `<name>_skiped_sites.txt` manifest, and summarised in the final log output for easy triage.
 - **Layered architecture:** The library is split into `core` (shared utilities & sparse ops), `engine` (parallel schedulers and position primitives), and `pipeline` (bam2mtx & call workflows), keeping reusable pieces lightweight and testable.
 - **Sparse-first analytics:** All matrix work is written against CSR matrices with adaptive density hints so memory usage tracks the number of edited positions, not the theoretical genome size.
+- **Strand-collapsed editing counts (New):** The `call` pipeline now merges complementary `*0`/`*1` strands before assigning counts to the `ref`, `alt`, and `others` matrices, guaranteeing strand-invariant allele totals.
 - **Optimized sparse operations:** Uses two-pointer algorithms for sparse matrix operations (O(nnz) complexity) instead of HashMap-based approaches, with SmallVec for temporary allocations and FxHashMap for faster non-cryptographic hashing.
 - **Minimal memory overhead:** Arc clones are kept to minimum, performance-critical paths avoid unnecessary allocations, and streaming converters maintain bounded memory usage.
 - **AnnData-native exports:** The toolkit produces `.h5ad` files that slot directly into Python-based workflows (Scanpy, scVI, Seurat via conversion).
@@ -147,6 +148,8 @@ Option reference:
 
 ### `call`
 Executes the full RNA editing pipeline on `.h5ad` inputs: variant annotation, strand-aware ref/alt counting, CEI computation, and mismatch statistics. Validation steps ensure reference FASTA, white-list TSV, and input AnnData all exist and are readable before work begins.
+
+Recent updates collapse opposing strand layers (`A0` + `A1`, etc.) before counts are distributed to the `ref`, `alt`, and `others` matrices. This guarantees that allelic support is identical regardless of BAM strand orientation and avoids spuriously split coverage in downstream metrics.
 
 Important options:
 - `--editingtype` · choose among AG, AC, AT, CA, CG, CT editing signatures.

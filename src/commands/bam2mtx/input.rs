@@ -46,7 +46,6 @@ impl PositionChunk {
     pub fn near_max_depth_count(&self) -> usize {
         self.near_max_depth_count
     }
-
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -577,8 +576,12 @@ mod tests {
         assert_eq!(chunks[0].positions.len(), 2);
         assert_eq!(chunks[1].positions.len(), 1);
 
-        let expected_first = (positions[0].depth + positions[0].ref_skip + positions[0].fail
-            + positions[1].depth + positions[1].ref_skip + positions[1].fail) as usize;
+        let expected_first = (positions[0].depth
+            + positions[0].ref_skip
+            + positions[0].fail
+            + positions[1].depth
+            + positions[1].ref_skip
+            + positions[1].fail) as usize;
         let first_chunk_weight: usize = chunks[0]
             .positions
             .iter()
@@ -586,7 +589,8 @@ mod tests {
             .sum();
         assert_eq!(first_chunk_weight, expected_first);
 
-        let expected_third = (positions[2].depth + positions[2].ref_skip + positions[2].fail) as usize;
+        let expected_third =
+            (positions[2].depth + positions[2].ref_skip + positions[2].fail) as usize;
         let last_chunk_weight: usize = chunks[1]
             .positions
             .iter()
@@ -594,8 +598,11 @@ mod tests {
             .sum();
         assert_eq!(last_chunk_weight, expected_third);
 
-        let legacy_weight = (positions[2].depth + positions[2].ins + positions[2].del
-            + positions[2].ref_skip + positions[2].fail) as usize;
+        let legacy_weight = (positions[2].depth
+            + positions[2].ins
+            + positions[2].del
+            + positions[2].ref_skip
+            + positions[2].fail) as usize;
         assert_ne!(last_chunk_weight, legacy_weight);
     }
 }

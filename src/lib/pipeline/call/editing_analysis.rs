@@ -30,7 +30,7 @@ use std::sync::Arc;
 /// 2. Extracts reference base information for all sites
 /// 3. Computes reference, alternate, and other base count matrices using
 ///    strand-aware logic that considers both positive and negative strand
-///    editing events
+///    editing events, collapsing complementary strands before assignment
 /// 4. Sets the computed matrices as layers in the AnnData container
 /// 5. Calculates observation-level statistics
 ///
@@ -94,15 +94,8 @@ fn compute_editing_matrices_vectorized(
     // Pre-compute base mappings for vectorized operations
     let (ref_site_masks, alt_site_masks) = create_vectorized_base_masks(ref_bases, editing_type);
 
-    // Process all base layers in parallel using native sparse operations
-    let bases = ['A', 'T', 'G', 'C'];
-    let base_matrices: Vec<(char, &CsrMatrix<u32>)> = bases
-        .iter()
-        .filter_map(|&base| {
-            let layer_name = format!("{}1", base);
-            adata.layers.get(&layer_name).map(|matrix| (base, matrix))
-        })
-        .collect();
+    // Collect strand-collapsed base layers so positive/negative strands are merged before assignment
+    let base_matrices = collect_strand_aware_base_layers(adata)?;
 
     if base_matrices.is_empty() {
         return Err(RedicatError::DataProcessing(
@@ -114,7 +107,7 @@ fn compute_editing_matrices_vectorized(
     let (ref_matrix, alt_matrix, others_matrix) = base_matrices
         .into_par_iter()
         .map(|(base, matrix)| {
-            compute_base_contributions_vectorized(matrix, &ref_site_masks, &alt_site_masks, base)
+            compute_base_contributions_vectorized(&matrix, &ref_site_masks, &alt_site_masks, base)
         })
         .reduce(
             || {
@@ -138,6 +131,34 @@ fn compute_editing_matrices_vectorized(
 
     info!("Completed vectorized editing matrix computation");
     Ok((ref_matrix, alt_matrix, others_matrix))
+}
+
+/// Collect strand-aware base matrices by collapsing positive (*1) and negative (*0) layers.
+fn collect_strand_aware_base_layers(
+    adata: &AnnDataContainer,
+) -> Result<Vec<(char, CsrMatrix<u32>)>> {
+    let mut combined_layers = Vec::with_capacity(4);
+
+    for &base in &['A', 'T', 'G', 'C'] {
+        let pos_layer = format!("{}1", base);
+        let neg_layer = format!("{}0", base);
+
+        let pos = adata.layers.get(&pos_layer);
+        let neg = adata.layers.get(&neg_layer);
+
+        match (pos, neg) {
+            (None, None) => continue,
+            (Some(matrix), None) | (None, Some(matrix)) => {
+                combined_layers.push((base, matrix.clone()))
+            }
+            (Some(pos_matrix), Some(neg_matrix)) => {
+                let summed = SparseOps::add_matrices(pos_matrix, neg_matrix)?;
+                combined_layers.push((base, summed));
+            }
+        }
+    }
+
+    Ok(combined_layers)
 }
 
 /// Create vectorized base masks for efficient sparse operations
@@ -606,4 +627,90 @@ fn get_var_string(var_df: &DataFrame, row: usize, col: &str) -> Option<String> {
             _ => None,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::sparse::SparseOps;
+
+    fn csr_from_triplets(
+        n_rows: usize,
+        n_cols: usize,
+        triplets: &[(usize, usize, u32)],
+    ) -> CsrMatrix<u32> {
+        SparseOps::from_triplets_u32(n_rows, n_cols, triplets.to_vec())
+            .expect("Failed to build CSR matrix for test")
+    }
+
+    fn matrix_value(matrix: &CsrMatrix<u32>, row: usize, col: usize) -> u32 {
+        let row_view = matrix.row(row);
+        row_view
+            .col_indices()
+            .iter()
+            .zip(row_view.values())
+            .find_map(|(&col_idx, &value)| (col_idx == col).then_some(value))
+            .unwrap_or(0)
+    }
+
+    fn build_adata(ref_base: &str, layers: Vec<(&str, CsrMatrix<u32>)>) -> AnnDataContainer {
+        let mut adata = AnnDataContainer::new(1, 1);
+        adata.obs_names = vec!["cell_0".into()];
+        adata.var_names = vec!["chr1:1".into()];
+        adata.obs = DataFrame::new(vec![
+            Series::new("obs_names".into(), &["cell_0"]).into_column()
+        ])
+        .expect("Failed to build obs dataframe for test");
+        adata.var = DataFrame::new(vec![
+            Series::new("var_names".into(), &["chr1:1"]).into_column(),
+            Series::new("ref".into(), &[ref_base]).into_column(),
+        ])
+        .expect("Failed to build var dataframe for test");
+        for (name, matrix) in layers {
+            adata.layers.insert(name.to_string(), matrix);
+        }
+        adata
+    }
+
+    #[test]
+    fn strand_layers_are_summed_prior_to_assignment() {
+        let a1 = csr_from_triplets(1, 1, &[(0, 0, 2)]);
+        let a0 = csr_from_triplets(1, 1, &[(0, 0, 3)]);
+        let g1 = csr_from_triplets(1, 1, &[(0, 0, 4)]);
+        let g0 = csr_from_triplets(1, 1, &[(0, 0, 5)]);
+
+        let adata = build_adata("A", vec![("A1", a1), ("A0", a0), ("G1", g1), ("G0", g0)]);
+
+        let result = calculate_ref_alt_matrices(adata, &EditingType::AG)
+            .expect("ref/alt matrix calculation failed");
+
+        let ref_layer = result.layers.get("ref").expect("missing ref layer");
+        let alt_layer = result.layers.get("alt").expect("missing alt layer");
+        let others_layer = result.layers.get("others").expect("missing others layer");
+
+        assert_eq!(matrix_value(ref_layer, 0, 0), 5);
+        assert_eq!(matrix_value(alt_layer, 0, 0), 9);
+        assert_eq!(others_layer.nnz(), 0);
+
+        let x_matrix = result.x.expect("missing X matrix");
+        assert_eq!(x_matrix.nrows(), 1);
+        assert_eq!(x_matrix.ncols(), 1);
+        assert_eq!(x_matrix.csr_data().2[0], 9f64);
+    }
+
+    #[test]
+    fn negative_only_layers_are_handled() {
+        let a0 = csr_from_triplets(1, 1, &[(0, 0, 7)]);
+
+        let adata = build_adata("A", vec![("A0", a0)]);
+
+        let result = calculate_ref_alt_matrices(adata, &EditingType::AG)
+            .expect("ref/alt matrix calculation failed");
+
+        let ref_layer = result.layers.get("ref").expect("missing ref layer");
+        let alt_layer = result.layers.get("alt").expect("missing alt layer");
+
+        assert_eq!(matrix_value(ref_layer, 0, 0), 7);
+        assert_eq!(alt_layer.nnz(), 0);
+    }
 }

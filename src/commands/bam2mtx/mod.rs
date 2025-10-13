@@ -238,7 +238,8 @@ pub fn run_bam2mtx(args: Bam2MtxArgs) -> Result<()> {
     }
 
     let output_path = args.output.clone();
-    let converter = AnnDataConverter::new(adata_config, Arc::clone(&barcode_processor), contig_names);
+    let converter =
+        AnnDataConverter::new(adata_config, Arc::clone(&barcode_processor), contig_names);
     info!(
         "Assembling sparse matrices from {} result batches...",
         position_batches.len()
