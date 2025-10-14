@@ -8,7 +8,7 @@ repository = "https://github.com/aStudyingTurtle/redicat"
 description = "REDICAT - RNA Editing Cellular Assessment Toolkit: A highly parallelized utility for analyzing RNA editing events in single-cell RNA-seq data"
 documentation = "https://github.com/aStudyingTurtle/redicat/blob/main/README.md"
 readme = "README.md"
-categories = ["science", "bioinformatics"]
+categories = ["science"]
 keywords = [
     "bioinformatics",
     "single-cell",
