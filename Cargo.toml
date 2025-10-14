@@ -1,20 +1,16 @@
 [package]
 name = "redicat"
 version = "0.3.2"
-authors = ["Li Jiaxuan <lijiaxuanchn@outlook.com>"]
+authors = ["Li Jiaxuan <lijiaxaun2023@mail.sustech.edu.cn>"]
 edition = "2018"
 license = "MIT"
-repository = "https://github.com/aStudyingTurtle/perbase_redicat"
+repository = "https://github.com/aStudyingTurtle/redicat"
 description = "REDICAT - RNA Editing Cellular Assessment Toolkit: A highly parallelized utility for analyzing RNA editing events in single-cell RNA-seq data"
-documentation = "https://github.com/aStudyingTurtle/perbase_redicat/tree/main/docs"
+documentation = "https://github.com/aStudyingTurtle/redicat/blob/main/README.md"
 readme = "README.md"
-categories = ["science"]
+categories = ["science", "bioinformatics"]
 keywords = [
-    "depth",
-    "coverage",
     "bioinformatics",
-    "genomic",
-    "indel",
     "single-cell",
     "rna-editing",
     "rna-seq",
