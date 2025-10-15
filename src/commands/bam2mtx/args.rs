@@ -54,7 +54,7 @@ pub struct Bam2MtxArgs {
     pub stranded: bool,
 
     /// Maximum pileup depth to examine per site.
-    #[structopt(long = "max-depth", default_value = "655360", short = "D")]
+    #[structopt(long = "max-depth", default_value = "65536", short = "D")]
     pub max_depth: u32,
 
     /// UMI tag name.

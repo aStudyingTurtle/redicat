@@ -136,7 +136,7 @@ Option reference:
 | `-d`  | `--min-depth`         | Minimum non-`N` coverage to keep a site.                       | `10`     |
 | `-n`  | `--max-n-fraction`    | Maximum tolerated ambiguous fraction (depth / value).          | `20`     |
 | `-et` | `--editing-threshold` | Ensures at least two bases exceed `depth / editing-threshold`. | `1000`   |
-| `-D`  | `--max-depth`         | Cap on pileup traversal depth during matrix assembly (default 655,360). Sites with depth ≥ cap are skipped, logged, and mirrored to `<output>_skiped_sites.txt`.         | `655360`  |
+| `-D`  | `--max-depth`         | Cap on pileup traversal depth during matrix assembly (default 655,360). Sites with depth ≥ cap are skipped, logged, and mirrored to `<output>_skiped_sites.txt`.         | `65536`  |
 | `-S`  | `--stranded`          | Treat UMIs as strand-aware.                                    | `false`  |
 | —     | `--umi-tag`           | BAM tag containing UMI sequence.                               | `UB`     |
 | —     | `--cb-tag`            | BAM tag containing cell barcode.                               | `CB`     |
